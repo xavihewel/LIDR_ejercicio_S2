@@ -1,5 +1,14 @@
 # Estimador CAG
 
+Las directrices de desarrollo están en `AGENTS.md`. Para los cambios de
+comportamiento se sigue TDD: reproducir el caso con una prueba que falle,
+implementar la corrección y refactorizar con las pruebas en verde.
+Para ejecutar las pruebas sin llamadas reales al LLM:
+
+```sh
+uv run python -m unittest discover -s tests -v
+```
+
 ```text
 estimador-cag/
 ├── app/
@@ -79,6 +88,13 @@ se estima de forma independiente. El chat llama directamente a
 `stream_estimation` del servicio LLM compartido con el endpoint CAG y utiliza
 exactamente su system prompt y sus ejemplos. No necesita arrancar FastAPI.
 Configura `OPENAI_API_KEY` y `LLM_PROVIDER=openai` en `.env`.
+
+El panel lateral muestra el system prompt completo en solo lectura y las
+estimaciones de ejemplo que forman el contexto CAG. Tras cada envío muestra
+el modelo, los tokens de entrada y salida informados por el proveedor y el
+tiempo total de generación en segundos. Las métricas se conservan durante
+la sesión; si una llamada falla o no informa del consumo, los tokens aparecen
+como «No disponible», sin reutilizar cifras de una llamada anterior.
 
 Los servicios pueden obtener la configuración validada con
 `from app.config import get_settings`. La configuración se carga una vez al

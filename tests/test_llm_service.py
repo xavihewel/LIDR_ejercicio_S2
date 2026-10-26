@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.config import Settings
 from app.context.examples import ESTIMATION_EXAMPLES
-from app.services.llm_service import generate_estimation, stream_estimation
+from app.services.llm_service import EstimationMetrics, generate_estimation, stream_estimation
 
 
 class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
@@ -60,13 +60,23 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         stream = AsyncMock()
         stream.__aiter__.return_value = chunks
         self.create.return_value = stream
-        result = stream_estimation("Una reunión")
+        chunks.append(SimpleNamespace(
+            choices=[], model="resolved-model",
+            usage=SimpleNamespace(prompt_tokens=321, completion_tokens=54),
+        ))
+        metrics = EstimationMetrics()
+        result = stream_estimation("Una reunión", metrics=metrics)
         self.assertEqual(await anext(result), "Estimación ")
         stream.__aexit__.assert_not_awaited()
         self.assertEqual([text async for text in result], ["generada"])
         stream.__aexit__.assert_awaited_once()
         request = self.create.call_args.kwargs
         self.assertTrue(request["stream"])
+        self.assertEqual(request["stream_options"], {"include_usage": True})
+        self.assertEqual(metrics.model, "resolved-model")
+        self.assertEqual(metrics.input_tokens, 321)
+        self.assertEqual(metrics.output_tokens, 54)
+        self.assertGreaterEqual(metrics.response_seconds, 0)
         self.assertEqual(request["messages"][1]["content"], "Una reunión")
         for example in ESTIMATION_EXAMPLES:
             self.assertIn(example["meeting_summary"], request["messages"][0]["content"])
@@ -87,6 +97,27 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             _ = [text async for text in stream_estimation(" \n ")]
         self.client_factory.assert_not_called()
+
+    async def test_stream_does_not_reuse_token_counts_when_usage_is_missing(self):
+        metrics = EstimationMetrics(
+            model="previous-model", input_tokens=999, output_tokens=100,
+            response_seconds=10,
+        )
+        stream = AsyncMock()
+        stream.__aiter__.return_value = [SimpleNamespace(
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="Nueva estimación"), finish_reason="stop"
+            )], usage=None, model=self.settings.llm_model,
+        )]
+        self.create.return_value = stream
+
+        self.assertEqual(
+            [text async for text in stream_estimation("Otra reunión", metrics=metrics)],
+            ["Nueva estimación"],
+        )
+        self.assertIsNone(metrics.input_tokens)
+        self.assertIsNone(metrics.output_tokens)
+        self.assertEqual(metrics.model, self.settings.llm_model)
 
     async def test_rejects_unsupported_provider(self):
         self.settings.llm_provider = "anthropic"

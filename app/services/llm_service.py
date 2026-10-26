@@ -1,11 +1,24 @@
 """Generación de estimaciones con contexto incluido directamente en la llamada."""
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from time import perf_counter
 
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
 from app.config import Settings, get_settings
 from app.context.examples import ESTIMATION_EXAMPLES
+
+
+@dataclass
+class EstimationMetrics:
+    """Datos reales de la última llamada; None indica un dato no disponible."""
+
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    response_seconds: float | None = None
 
 
 def build_system_prompt() -> str:
@@ -45,36 +58,62 @@ def _estimation_settings(transcription: str) -> Settings:
     return settings
 
 
-async def stream_estimation(transcription: str) -> AsyncIterator[str]:
+def _estimation_client(settings: Settings) -> AsyncOpenAI:
+    """Crea el cliente común a las llamadas completas y en streaming."""
+    return AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+
+
+def _estimation_messages(transcription: str) -> list[ChatCompletionMessageParam]:
+    """Mantiene el mismo contexto y los mismos roles en ambos modos."""
+    return [
+        {"role": "system", "content": build_system_prompt()},
+        {"role": "user", "content": transcription},
+    ]
+
+
+async def stream_estimation(
+    transcription: str, *, metrics: EstimationMetrics | None = None
+) -> AsyncIterator[str]:
     """Entrega fragmentos de texto conforme llegan y valida el cierre del stream."""
-    settings = _estimation_settings(transcription)
-    async with AsyncOpenAI(
-        api_key=settings.openai_api_key.get_secret_value(),
-    ) as client:
-        stream = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": build_system_prompt()},
-                {"role": "user", "content": transcription},
-            ],
-            stream=True,
-        )
-        has_text = False
-        finish_reason = None
-        async with stream:
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                choice = chunk.choices[0]
-                if choice.delta.content:
-                    has_text = has_text or bool(choice.delta.content.strip())
-                    yield choice.delta.content
-                if choice.finish_reason is not None:
-                    finish_reason = choice.finish_reason
-        if finish_reason != "stop":
-            raise RuntimeError("El modelo no pudo completar la estimación.")
-        if not has_text:
-            raise RuntimeError("El modelo devolvió una estimación vacía.")
+    metrics = metrics if metrics is not None else EstimationMetrics()
+    metrics.model = None
+    metrics.input_tokens = None
+    metrics.output_tokens = None
+    metrics.response_seconds = None
+    started = perf_counter()
+    try:
+        settings = _estimation_settings(transcription)
+        metrics.model = settings.llm_model
+        async with _estimation_client(settings) as client:
+            stream = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=_estimation_messages(transcription),
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            has_text = False
+            finish_reason = None
+            async with stream:
+                async for chunk in stream:
+                    if getattr(chunk, "model", None):
+                        metrics.model = chunk.model
+                    if getattr(chunk, "usage", None) is not None:
+                        metrics.input_tokens = chunk.usage.prompt_tokens
+                        metrics.output_tokens = chunk.usage.completion_tokens
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    if choice.delta.content:
+                        has_text = has_text or bool(choice.delta.content.strip())
+                        yield choice.delta.content
+                    if choice.finish_reason is not None:
+                        finish_reason = choice.finish_reason
+            if finish_reason != "stop":
+                raise RuntimeError("El modelo no pudo completar la estimación.")
+            if not has_text:
+                raise RuntimeError("El modelo devolvió una estimación vacía.")
+    finally:
+        metrics.response_seconds = perf_counter() - started
 
 
 async def generate_estimation(transcription: str) -> str:
@@ -85,15 +124,10 @@ async def generate_estimation(transcription: str) -> str:
     """
     settings = _estimation_settings(transcription)
 
-    async with AsyncOpenAI(
-        api_key=settings.openai_api_key.get_secret_value(),
-    ) as client:
+    async with _estimation_client(settings) as client:
         response = await client.chat.completions.create(
             model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": build_system_prompt()},
-                {"role": "user", "content": transcription},
-            ],
+            messages=_estimation_messages(transcription),
         )
 
     if not response.choices:
