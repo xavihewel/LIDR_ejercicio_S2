@@ -1,8 +1,10 @@
 """Generación de estimaciones con contexto incluido directamente en la llamada."""
 
+from collections.abc import AsyncIterator
+
 from openai import AsyncOpenAI
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.context.examples import ESTIMATION_EXAMPLES
 
 
@@ -30,12 +32,8 @@ def build_system_prompt() -> str:
     return instructions + examples
 
 
-async def generate_estimation(transcription: str) -> str:
-    """Envía contexto y transcripción a OpenAI y devuelve la estimación.
-
-    Rechaza transcripciones vacías y respuestas sin texto o incompletas.
-    Los errores del SDK se propagan para que la capa HTTP pueda gestionarlos.
-    """
+def _estimation_settings(transcription: str) -> Settings:
+    """Valida la entrada y la configuración común a ambos modos de generación."""
     if not transcription.strip():
         raise ValueError("La transcripción no puede estar vacía.")
 
@@ -44,6 +42,48 @@ async def generate_estimation(transcription: str) -> str:
         raise ValueError("El servicio de estimaciones solo admite LLM_PROVIDER=openai.")
     if settings.openai_api_key is None:
         raise ValueError("OPENAI_API_KEY es obligatoria para generar estimaciones.")
+    return settings
+
+
+async def stream_estimation(transcription: str) -> AsyncIterator[str]:
+    """Entrega fragmentos de texto conforme llegan y valida el cierre del stream."""
+    settings = _estimation_settings(transcription)
+    async with AsyncOpenAI(
+        api_key=settings.openai_api_key.get_secret_value(),
+    ) as client:
+        stream = await client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": build_system_prompt()},
+                {"role": "user", "content": transcription},
+            ],
+            stream=True,
+        )
+        has_text = False
+        finish_reason = None
+        async with stream:
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.delta.content:
+                    has_text = has_text or bool(choice.delta.content.strip())
+                    yield choice.delta.content
+                if choice.finish_reason is not None:
+                    finish_reason = choice.finish_reason
+        if finish_reason != "stop":
+            raise RuntimeError("El modelo no pudo completar la estimación.")
+        if not has_text:
+            raise RuntimeError("El modelo devolvió una estimación vacía.")
+
+
+async def generate_estimation(transcription: str) -> str:
+    """Envía contexto y transcripción a OpenAI y devuelve la estimación.
+
+    Rechaza transcripciones vacías y respuestas sin texto o incompletas.
+    Los errores del SDK se propagan para que la capa HTTP pueda gestionarlos.
+    """
+    settings = _estimation_settings(transcription)
 
     async with AsyncOpenAI(
         api_key=settings.openai_api_key.get_secret_value(),

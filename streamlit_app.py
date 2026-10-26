@@ -1,11 +1,9 @@
 """Chat para estimar software a partir de transcripciones de reuniones."""
 
-import asyncio
-
 import streamlit as st
 from openai import APIError, APITimeoutError
 
-from app.services.llm_service import generate_estimation
+from app.services.llm_service import stream_estimation
 
 
 st.set_page_config(page_title="Estimador CAG", page_icon="💬")
@@ -29,9 +27,11 @@ if transcription is not None:
             st.markdown(transcription)
 
         with st.chat_message("assistant"):
+            response = st.empty()
             with st.spinner("Generando estimación…"):
                 try:
-                    estimation = asyncio.run(generate_estimation(transcription))
+                    with response.container():
+                        estimation = st.write_stream(stream_estimation(transcription))
                 except APITimeoutError:
                     estimation = "El proveedor LLM no respondió a tiempo. Vuelve a enviar la transcripción."
                 except (APIError, RuntimeError):
@@ -41,5 +41,5 @@ if transcription is not None:
                         "Revisa la configuración del servicio: OPENAI_API_KEY, "
                         "LLM_PROVIDER=openai y LLM_MODEL en el archivo .env."
                     )
-            st.markdown(estimation)
+            response.markdown(estimation)
         st.session_state.messages.append({"role": "assistant", "content": estimation})

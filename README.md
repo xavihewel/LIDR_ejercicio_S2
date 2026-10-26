@@ -72,10 +72,11 @@ uv run streamlit run streamlit_app.py
 ```
 
 Abre `http://localhost:8501` y escribe o pega una transcripción en el chat.
-La estimación aparece como mensaje del asistente y el historial se mantiene
+La estimación aparece progresivamente con `st.write_stream` como mensaje del
+asistente y el historial se mantiene
 visible durante la sesión mediante `st.session_state`. Cada transcripción
 se estima de forma independiente. El chat llama directamente a
-`generate_estimation`, el mismo servicio del endpoint CAG, por lo que utiliza
+`stream_estimation` del servicio LLM compartido con el endpoint CAG y utiliza
 exactamente su system prompt y sus ejemplos. No necesita arrancar FastAPI.
 Configura `OPENAI_API_KEY` y `LLM_PROVIDER=openai` en `.env`.
 
