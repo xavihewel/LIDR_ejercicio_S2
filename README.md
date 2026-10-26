@@ -19,6 +19,7 @@ estimador-cag/
 ├── .env.example
 ├── .gitignore
 ├── pyproject.toml
+├── streamlit_app.py
 └── README.md
 ```
 
@@ -62,6 +63,21 @@ documenta todas las variables sin incluir valores. Se usa OpenAI por defecto,
 con `LLM_MODEL=gpt-4o-mini`, `APP_ENV=development` y `LOG_LEVEL=DEBUG`.
 Los valores vacíos permiten aplicar los valores por defecto.
 `ANTHROPIC_API_KEY` solo es obligatoria si seleccionas `LLM_PROVIDER=anthropic`.
+
+Para usar el chat de Streamlit:
+
+```sh
+uv sync
+uv run streamlit run streamlit_app.py
+```
+
+Abre `http://localhost:8501` y escribe o pega una transcripción en el chat.
+La estimación aparece como mensaje del asistente y el historial se mantiene
+visible durante la sesión mediante `st.session_state`. Cada transcripción
+se estima de forma independiente. El chat llama directamente a
+`generate_estimation`, el mismo servicio del endpoint CAG, por lo que utiliza
+exactamente su system prompt y sus ejemplos. No necesita arrancar FastAPI.
+Configura `OPENAI_API_KEY` y `LLM_PROVIDER=openai` en `.env`.
 
 Los servicios pueden obtener la configuración validada con
 `from app.config import get_settings`. La configuración se carga una vez al
