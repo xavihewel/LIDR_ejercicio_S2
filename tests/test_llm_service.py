@@ -36,7 +36,8 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.create.call_args.args[0], self.settings)
         system, user = request["messages"]
         self.assertEqual(system["role"], "system")
-        self.assertEqual(user, {"role": "user", "content": transcript})
+        self.assertEqual(user["role"], "user")
+        self.assertIn(f"<project_description>\n{transcript}\n</project_description>", user["content"])
         for example in ESTIMATION_EXAMPLES:
             self.assertIn(example["meeting_summary"], system["content"])
             self.assertIn(example["estimation"].strip(), system["content"])
@@ -78,7 +79,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics.input_tokens, 321)
         self.assertEqual(metrics.output_tokens, 54)
         self.assertGreaterEqual(metrics.response_seconds, 0)
-        self.assertEqual(request["messages"][1]["content"], "Una reunión")
+        self.assertIn("<project_description>\nUna reunión\n</project_description>", request["messages"][1]["content"])
         for example in ESTIMATION_EXAMPLES:
             self.assertIn(example["meeting_summary"], request["messages"][0]["content"])
 
@@ -218,3 +219,22 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             self.create.assert_awaited_once()
             await generate_estimation("Una reunión ")
             self.assertEqual(self.create.await_count, 2)
+
+    async def test_loader_messages_are_used_in_complete_and_streaming_modes(self):
+        from app.prompts.loader import render_estimation_prompt
+        from app.schemas import EstimationRequest, ProjectType, DetailLevel, OutputFormat
+        request = EstimationRequest(
+            description="Mobile app with login and chat.", project_type=ProjectType.MOBILE_APP,
+            detail_level=DetailLevel.DETAILED, output_format=OutputFormat.NARRATIVE,
+        )
+        system, user = render_estimation_prompt(request)
+        expected = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        await generate_estimation(request)
+        self.assertEqual(self.create.call_args.args[1], expected)
+        upstream = AsyncMock()
+        upstream.__aiter__.return_value = [SimpleNamespace(choices=[SimpleNamespace(
+            delta=SimpleNamespace(content="Resultado"), finish_reason="stop"
+        )])]
+        self.create.return_value = upstream
+        _ = [part async for part in stream_estimation(request)]
+        self.assertEqual(self.create.call_args.args[1], expected)

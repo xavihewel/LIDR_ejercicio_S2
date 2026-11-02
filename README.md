@@ -135,8 +135,8 @@ docker run --name estimador-redis -p 6379:6379 -d redis:7-alpine
 La clave es un SHA-256 de los mensajes completos (incluidos el system prompt
 y todos los ejemplos), el modelo y el proveedor. Solo las entradas idénticas
 reutilizan la respuesta; cualquier cambio en el contexto, modelo, proveedor
-o texto genera otra clave. El endpoint elimina los espacios de los extremos
-antes de consultar el servicio, como parte de su validación existente.
+o texto genera otra clave. Los espacios del texto se conservan; las entradas
+vacías o compuestas solo por espacios se rechazan.
 
 Solo se guardan respuestas válidas y completas. En streaming, los fragmentos
 se entregan inmediatamente y se guardan juntos al finalizar; las respuestas
@@ -174,3 +174,30 @@ de estimación tienen nivel ERROR. Los logs propios no incluyen prompts,
 transcripciones, respuestas, claves, URL de Redis ni mensajes de excepción;
 los errores incluyen únicamente `error_type`. Los logs de librerías externas
 mantienen su propia configuración.
+
+## Prompts con plantillas
+
+El servicio compartido utiliza `render_estimation_prompt` de
+`app/prompts/loader.py` tanto para generación completa como para streaming.
+El sistema y el usuario se renderizan desde `app/prompts/v1/`, se envían como
+mensajes separados a LiteLLM y forman parte de la clave de caché. La descripción
+se incluye dentro de `<project_description>`; los ejemplos CAG se incluyen
+solo en el sistema. El panel lateral de Streamlit muestra el sistema por defecto
+renderizado desde estas mismas plantillas.
+
+El endpoint acepta una petición estructurada:
+
+```json
+{
+  "description": "Aplicación móvil con login, chat y notificaciones push.",
+  "project_type": "mobile_app",
+  "detail_level": "detailed",
+  "output_format": "phases_table"
+}
+```
+
+`project_type` admite `software` y `mobile_app`; `detail_level` admite `detailed`;
+`output_format` admite `phases_table` y `narrative`. Los valores por defecto son
+`software`, `detailed` y `phases_table`. Las peticiones existentes con
+`{"transcription": "..."}` siguen funcionando, al igual que el chat de Streamlit.
+La respuesta conserva los campos `estimation`, `model` y `provider`.

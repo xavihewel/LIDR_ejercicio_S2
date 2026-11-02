@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from litellm.exceptions import AuthenticationError, Timeout
 
 from app.main import app
+from app.schemas import EstimationRequest
 
 
 class EstimationEndpointTests(unittest.TestCase):
@@ -36,7 +37,7 @@ class EstimationEndpointTests(unittest.TestCase):
             "model": "gpt-4o-mini",
             "provider": "openai",
         })
-        self.service.assert_awaited_once_with("Necesitamos una plataforma web.")
+        self.service.assert_awaited_once_with(EstimationRequest(description="Necesitamos una plataforma web."))
 
     def test_invalid_requests_do_not_call_llm(self):
         for body in ({}, {"transcription": ""}, {"transcription": " \n "},
@@ -68,3 +69,26 @@ class EstimationEndpointTests(unittest.TestCase):
                     response = self.client.post("/api/v1/estimate", json={"transcription": "Reunión"})
                     self.assertEqual(response.status_code, status)
                     self.assertNotIn("private details", response.text)
+
+    def test_accepts_structured_prompt_request(self):
+        response = self.client.post("/api/v1/estimate", json={
+            "description": "Mobile app with login and chat.",
+            "project_type": "mobile_app", "detail_level": "detailed",
+            "output_format": "narrative",
+        })
+        self.assertEqual(response.status_code, 200)
+        request = self.service.call_args.args[0]
+        self.assertEqual(request.description, "Mobile app with login and chat.")
+        self.assertEqual(request.output_format.value, "narrative")
+
+    def test_invalid_prompt_options_do_not_call_provider(self):
+        for extra in (
+            {"project_type": "unknown"}, {"detail_level": "unknown"},
+            {"output_format": "unknown"}, {"description": " \n "},
+        ):
+            with self.subTest(extra=extra):
+                response = self.client.post(
+                    "/api/v1/estimate", json={"description": "Proyecto"} | extra
+                )
+                self.assertEqual(response.status_code, 422)
+        self.service.assert_not_awaited()

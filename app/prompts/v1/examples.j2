@@ -1,0 +1,10 @@
+<estimation_examples>
+{% for example in examples %}
+### Ejemplo {{ loop.index }}
+Resumen de la reunión:
+{{ example.meeting_summary }}
+
+Estimación:
+{{ example.estimation.strip() }}
+{% endfor %}
+</estimation_examples>
