@@ -148,3 +148,29 @@ en ese caso son los de la generación original y no un nuevo consumo.
 Si Redis no está disponible o una entrada está corrupta, el servicio continúa
 con el proveedor y registra una advertencia sin incluir transcripciones ni
 credenciales. `CACHE_ENABLED=false` desactiva las lecturas y escrituras.
+
+## Observabilidad básica
+
+FastAPI y Streamlit configuran `structlog` para emitir un objeto JSON por línea
+en la salida estándar. `LOG_LEVEL` en `.env` controla el nivel mínimo
+(`DEBUG`, `INFO`, `WARNING`, `ERROR` o `CRITICAL`). La configuración de logs no
+requiere credenciales LLM, por lo que `/health` sigue funcionando sin ellas.
+
+Cada petición HTTP tiene un identificador generado por el servidor, devuelto
+en `X-Request-ID` y propagado a los logs del servicio y de Redis. Los eventos
+`http_request_completed` y `http_request_failed` registran método, estado cuando
+hay respuesta y duración en segundos; las respuestas completadas incluyen la
+plantilla de ruta cuando está disponible.
+
+`estimation_completed`, `estimation_failed` y `estimation_cancelled` registran
+el modo streaming, proveedor cuando está disponible, modelo, duración,
+`cache_hit` y tokens disponibles. Si `cache_hit=true`, los tokens corresponden
+a la generación original; no representan nuevo consumo. En Streamlit estos
+eventos aparecen en la terminal donde se ejecuta el cliente.
+
+Redis emite `cache_hit`, `cache_miss`, `cache_stored`, `cache_read_failed` y
+`cache_write_failed`. Los fallos de caché tienen nivel WARNING; los errores
+de estimación tienen nivel ERROR. Los logs propios no incluyen prompts,
+transcripciones, respuestas, claves, URL de Redis ni mensajes de excepción;
+los errores incluyen únicamente `error_type`. Los logs de librerías externas
+mantienen su propia configuración.

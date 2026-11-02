@@ -3,6 +3,7 @@
 import streamlit as st
 from openai import APIError, APITimeoutError
 
+from app.observability import configure_logging
 from app.context.examples import ESTIMATION_EXAMPLES
 from app.services.llm_service import EstimationMetrics, build_system_prompt, stream_estimation
 
@@ -91,6 +92,7 @@ def render_sidebar() -> None:
 
 
 def main() -> None:
+    configure_logging()
     st.set_page_config(page_title="Estimador CAG", page_icon="💬")
     st.title("Estimador de software")
     st.write("Escribe o pega la transcripción de una reunión para obtener su estimación.")

@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.2.4",
     "redis>=8.1.0",
     "streamlit>=1.40.0",
+    "structlog>=26.1.0",
     "uvicorn[standard]>=0.54.0",
 ]
 

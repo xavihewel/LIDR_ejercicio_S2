@@ -2,13 +2,13 @@
 
 import hashlib
 import json
-import logging
+import structlog
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class CachedEstimation(BaseModel):
@@ -49,14 +49,18 @@ class LLMCache:
         try:
             async with self._client() as client:
                 raw = await client.get(key)
-            return CachedEstimation.model_validate_json(raw) if raw is not None else None
-        except (RedisError, ValidationError, UnicodeError):
-            logger.warning("No se pudo leer la caché de estimaciones.")
+            result = CachedEstimation.model_validate_json(raw) if raw is not None else None
+            logger.info("cache_hit" if result is not None else "cache_miss")
+            return result
+        except (RedisError, ValidationError, UnicodeError) as exc:
+            logger.warning("cache_read_failed", error_type=type(exc).__name__)
             return None
 
     async def set(self, key: str, result: CachedEstimation) -> None:
         try:
             async with self._client() as client:
                 await client.setex(key, self.ttl, result.model_dump_json())
-        except RedisError:
-            logger.warning("No se pudo guardar la estimación en caché.")
+        except RedisError as exc:
+            logger.warning("cache_write_failed", error_type=type(exc).__name__)
+        else:
+            logger.info("cache_stored", ttl_seconds=self.ttl)

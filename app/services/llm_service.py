@@ -7,6 +7,7 @@ from time import perf_counter
 
 from openai.types.chat import ChatCompletionMessageParam
 
+from app.observability import observe_estimation
 from app.config import Settings, get_settings
 from app.context.examples import ESTIMATION_EXAMPLES
 from app.services.llm_provider import complete
@@ -64,7 +65,7 @@ def _estimation_messages(transcription: str) -> list[ChatCompletionMessageParam]
     ]
 
 
-async def stream_estimation(
+async def _stream_estimation(
     transcription: str, *, metrics: EstimationMetrics | None = None
 ) -> AsyncIterator[str]:
     """Entrega fragmentos de texto conforme llegan y valida el cierre del stream."""
@@ -122,7 +123,7 @@ async def stream_estimation(
         metrics.response_seconds = perf_counter() - started
 
 
-async def generate_estimation(transcription: str) -> str:
+async def _generate_estimation(transcription: str, metrics: EstimationMetrics) -> str:
     """Envía contexto y transcripción al proveedor configurado y devuelve la estimación.
 
     Rechaza transcripciones vacías y respuestas sin texto o incompletas.
@@ -130,11 +131,16 @@ async def generate_estimation(transcription: str) -> str:
     """
     settings = _estimation_settings(transcription)
 
+    metrics.model = settings.llm_model
     messages = _estimation_messages(transcription)
     cache = LLMCache(settings.redis_url, settings.cache_ttl)
     key = cache.cache_key(messages, settings.llm_model, settings.llm_provider)
     cached = await cache.get(key) if settings.cache_enabled else None
     if cached is not None:
+        metrics.cache_hit = True
+        metrics.model = cached.model
+        metrics.input_tokens = cached.tokens_in
+        metrics.output_tokens = cached.tokens_out
         return cached.content
     response = await complete(settings, messages)
 
@@ -146,11 +152,34 @@ async def generate_estimation(transcription: str) -> str:
     content = choice.message.content
     if not content or not content.strip():
         raise RuntimeError("El modelo devolvió una estimación vacía.")
+    usage = getattr(response, "usage", None)
+    metrics.model = getattr(response, "model", None) or settings.llm_model
+    metrics.input_tokens = usage.prompt_tokens if usage else None
+    metrics.output_tokens = usage.completion_tokens if usage else None
     if settings.cache_enabled:
-        usage = getattr(response, "usage", None)
         await cache.set(key, CachedEstimation(
             content=content, model=getattr(response, "model", None) or settings.llm_model,
             tokens_in=usage.prompt_tokens if usage else None,
             tokens_out=usage.completion_tokens if usage else None,
         ))
     return content
+
+
+async def generate_estimation(transcription: str) -> str:
+    """Genera una estimación y registra duración, consumo y resultado."""
+    metrics = EstimationMetrics()
+    with observe_estimation(metrics, streaming=False) as fields:
+        fields["provider"] = get_settings().llm_provider
+        return await _generate_estimation(transcription, metrics)
+
+
+async def stream_estimation(
+    transcription: str, *, metrics: EstimationMetrics | None = None
+) -> AsyncIterator[str]:
+    """Observa todo el stream, incluido su cierre anticipado."""
+    metrics = metrics if metrics is not None else EstimationMetrics()
+    with observe_estimation(metrics, streaming=True) as fields:
+        fields["provider"] = get_settings().llm_provider
+        async with aclosing(_stream_estimation(transcription, metrics=metrics)) as stream:
+            async for part in stream:
+                yield part
