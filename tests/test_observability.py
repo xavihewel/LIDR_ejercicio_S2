@@ -62,7 +62,7 @@ class EstimationLoggingTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_logs_usage_and_cache_hit_without_counting_a_new_call(self):
         from types import SimpleNamespace
         from app.services.llm_cache import CachedEstimation
-        settings = Settings(_env_file=None, openai_api_key="test")
+        settings = Settings(_env_file=None, openai_api_key="test", cache_enabled=True)
         response = SimpleNamespace(
             model="resolved", usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3),
             choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="Answer"))],
@@ -96,5 +96,8 @@ class EstimationLoggingTests(unittest.IsolatedAsyncioTestCase):
             result = stream_estimation("Input describing a mobile application")
             await anext(result)
             await result.aclose()
-        self.assertEqual([e["event"] for e in events], ["estimation_cancelled"])
+        self.assertEqual(
+            [e["event"] for e in events if e["event"].startswith("estimation_")],
+            ["estimation_cancelled"],
+        )
         upstream.aclose.assert_awaited_once()

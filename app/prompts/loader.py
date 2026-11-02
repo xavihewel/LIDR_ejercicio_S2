@@ -1,10 +1,16 @@
 """Renderizado de prompts de estimación organizados por versión."""
 
+import hashlib
+import json
 from pathlib import Path
+
+import structlog
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from app.schemas import EstimationRequest
 from app.context.examples import ESTIMATION_EXAMPLES
+
+logger = structlog.get_logger(__name__)
 
 DEFAULT_PROMPT_VERSION = "v1"
 
@@ -37,4 +43,14 @@ def render_estimation_prompt(
         "examples_template": f"{template_dir}/examples.j2",
     }
 
-    return system.render(**context), user.render(**context)
+    rendered_system = system.render(**context)
+    rendered_user = user.render(**context)
+    content = json.dumps(
+        {"system": rendered_system, "user": rendered_user},
+        ensure_ascii=False, sort_keys=True,
+    )
+    logger.info(
+        "prompt_rendered", prompt_version=version,
+        prompt_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
+    return rendered_system, rendered_user

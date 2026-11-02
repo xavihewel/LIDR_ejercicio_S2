@@ -145,3 +145,10 @@ fallos de caché y errores de estimación. Los logs propios no incluyen prompts,
 transcripciones, respuestas, claves, URL de Redis ni mensajes de excepción;
 los errores incluyen únicamente `error_type`. Las librerías externas conservan
 su propia configuración de logs.
+
+Cada render correcto del loader emite `prompt_rendered` a nivel INFO con
+`prompt_version` y `prompt_hash`. El hash es SHA-256 del JSON UTF-8 de los
+mensajes `system` y `user`, con claves ordenadas. Permite comparar el contenido
+renderizado sin escribirlo en logs; cambia si cambia cualquiera de los mensajes.
+El evento hereda el `request_id` HTTP cuando está disponible. Un fallo de
+renderizado no emite este evento de éxito.

@@ -11,7 +11,7 @@ from app.services.llm_service import EstimationMetrics, generate_estimation, str
 
 class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.settings = Settings(_env_file=None, openai_api_key="test-only", llm_provider="openai")
+        self.settings = Settings(_env_file=None, openai_api_key="test-only", llm_provider="openai", cache_enabled=True)
         self.settings_patch = patch(
             "app.services.llm_service.get_settings", return_value=self.settings
         )
