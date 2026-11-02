@@ -1,20 +1,23 @@
 """Generación de estimaciones con contexto incluido directamente en la llamada."""
 
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from time import perf_counter
 
-from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from app.config import Settings, get_settings
 from app.context.examples import ESTIMATION_EXAMPLES
+from app.services.llm_provider import complete
+from app.services.llm_cache import CachedEstimation, LLMCache
 
 
 @dataclass
 class EstimationMetrics:
     """Datos reales de la última llamada; None indica un dato no disponible."""
 
+    cache_hit: bool = False
     model: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -50,17 +53,7 @@ def _estimation_settings(transcription: str) -> Settings:
     if not transcription.strip():
         raise ValueError("La transcripción no puede estar vacía.")
 
-    settings = get_settings()
-    if settings.llm_provider != "openai":
-        raise ValueError("El servicio de estimaciones solo admite LLM_PROVIDER=openai.")
-    if settings.openai_api_key is None:
-        raise ValueError("OPENAI_API_KEY es obligatoria para generar estimaciones.")
-    return settings
-
-
-def _estimation_client(settings: Settings) -> AsyncOpenAI:
-    """Crea el cliente común a las llamadas completas y en streaming."""
-    return AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+    return get_settings()
 
 
 def _estimation_messages(transcription: str) -> list[ChatCompletionMessageParam]:
@@ -76,6 +69,7 @@ async def stream_estimation(
 ) -> AsyncIterator[str]:
     """Entrega fragmentos de texto conforme llegan y valida el cierre del stream."""
     metrics = metrics if metrics is not None else EstimationMetrics()
+    metrics.cache_hit = False
     metrics.model = None
     metrics.input_tokens = None
     metrics.output_tokens = None
@@ -84,51 +78,65 @@ async def stream_estimation(
     try:
         settings = _estimation_settings(transcription)
         metrics.model = settings.llm_model
-        async with _estimation_client(settings) as client:
-            stream = await client.chat.completions.create(
-                model=settings.llm_model,
-                messages=_estimation_messages(transcription),
-                stream=True,
-                stream_options={"include_usage": True},
-            )
+        messages = _estimation_messages(transcription)
+        cache = LLMCache(settings.redis_url, settings.cache_ttl)
+        key = cache.cache_key(messages, settings.llm_model, settings.llm_provider)
+        cached = await cache.get(key) if settings.cache_enabled else None
+        if cached is not None:
+            metrics.cache_hit = True
+            metrics.model = cached.model
+            metrics.input_tokens = cached.tokens_in
+            metrics.output_tokens = cached.tokens_out
+            yield cached.content
+            return
+        stream = await complete(settings, messages, stream=True)
+        parts = []
+        async with aclosing(stream):
             has_text = False
             finish_reason = None
-            async with stream:
-                async for chunk in stream:
-                    if getattr(chunk, "model", None):
-                        metrics.model = chunk.model
-                    if getattr(chunk, "usage", None) is not None:
-                        metrics.input_tokens = chunk.usage.prompt_tokens
-                        metrics.output_tokens = chunk.usage.completion_tokens
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    if choice.delta.content:
-                        has_text = has_text or bool(choice.delta.content.strip())
-                        yield choice.delta.content
-                    if choice.finish_reason is not None:
-                        finish_reason = choice.finish_reason
+            async for chunk in stream:
+                if getattr(chunk, "model", None):
+                    metrics.model = chunk.model
+                if getattr(chunk, "usage", None) is not None:
+                    metrics.input_tokens = chunk.usage.prompt_tokens
+                    metrics.output_tokens = chunk.usage.completion_tokens
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.delta.content:
+                    has_text = has_text or bool(choice.delta.content.strip())
+                    parts.append(choice.delta.content)
+                    yield choice.delta.content
+                if choice.finish_reason is not None:
+                    finish_reason = choice.finish_reason
             if finish_reason != "stop":
                 raise RuntimeError("El modelo no pudo completar la estimación.")
             if not has_text:
                 raise RuntimeError("El modelo devolvió una estimación vacía.")
+        if settings.cache_enabled:
+            await cache.set(key, CachedEstimation(
+                content="".join(parts), model=metrics.model,
+                tokens_in=metrics.input_tokens, tokens_out=metrics.output_tokens,
+            ))
     finally:
         metrics.response_seconds = perf_counter() - started
 
 
 async def generate_estimation(transcription: str) -> str:
-    """Envía contexto y transcripción a OpenAI y devuelve la estimación.
+    """Envía contexto y transcripción al proveedor configurado y devuelve la estimación.
 
     Rechaza transcripciones vacías y respuestas sin texto o incompletas.
     Los errores del SDK se propagan para que la capa HTTP pueda gestionarlos.
     """
     settings = _estimation_settings(transcription)
 
-    async with _estimation_client(settings) as client:
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=_estimation_messages(transcription),
-        )
+    messages = _estimation_messages(transcription)
+    cache = LLMCache(settings.redis_url, settings.cache_ttl)
+    key = cache.cache_key(messages, settings.llm_model, settings.llm_provider)
+    cached = await cache.get(key) if settings.cache_enabled else None
+    if cached is not None:
+        return cached.content
+    response = await complete(settings, messages)
 
     if not response.choices:
         raise RuntimeError("El modelo no devolvió ninguna estimación.")
@@ -138,4 +146,11 @@ async def generate_estimation(transcription: str) -> str:
     content = choice.message.content
     if not content or not content.strip():
         raise RuntimeError("El modelo devolvió una estimación vacía.")
+    if settings.cache_enabled:
+        usage = getattr(response, "usage", None)
+        await cache.set(key, CachedEstimation(
+            content=content, model=getattr(response, "model", None) or settings.llm_model,
+            tokens_in=usage.prompt_tokens if usage else None,
+            tokens_out=usage.completion_tokens if usage else None,
+        ))
     return content

@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     llm_provider: Literal["openai", "anthropic"] = "openai"
     llm_model: str = "gpt-4o-mini"
+    redis_url: str = "redis://localhost:6379"
+    cache_ttl: int = Field(default=86400, gt=0)
+    cache_enabled: bool = True
     app_env: str = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG"
 

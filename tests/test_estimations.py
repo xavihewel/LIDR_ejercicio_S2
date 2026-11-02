@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from litellm.exceptions import AuthenticationError, Timeout
 
 from app.main import app
 
@@ -55,3 +56,15 @@ class EstimationEndpointTests(unittest.TestCase):
         self.service.side_effect = ValueError("Missing API key")
         response = self.client.post("/api/v1/estimate", json={"transcription": "Reunión"})
         self.assertEqual(response.status_code, 503)
+
+    def test_litellm_errors_preserve_http_contract_for_both_providers(self):
+        for provider in ("openai", "anthropic"):
+            for error, status in (
+                (Timeout(message="private details", model="test", llm_provider=provider), 504),
+                (AuthenticationError(message="private details", model="test", llm_provider=provider), 502),
+            ):
+                with self.subTest(provider=provider, status=status):
+                    self.service.side_effect = error
+                    response = self.client.post("/api/v1/estimate", json={"transcription": "Reunión"})
+                    self.assertEqual(response.status_code, status)
+                    self.assertNotIn("private details", response.text)

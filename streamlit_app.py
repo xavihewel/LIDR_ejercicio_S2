@@ -30,8 +30,8 @@ def render_estimation(transcription: str, metrics: EstimationMetrics) -> str:
                 estimation = "No se pudo obtener la estimación. Vuelve a intentarlo."
             except ValueError:
                 estimation = (
-                    "Revisa la configuración del servicio: OPENAI_API_KEY, "
-                    "LLM_PROVIDER=openai y LLM_MODEL en el archivo .env."
+                    "Revisa LLM_PROVIDER, LLM_MODEL y la clave del proveedor "
+                    "(OPENAI_API_KEY o ANTHROPIC_API_KEY) en el archivo .env."
                 )
         response.markdown(estimation)
     return estimation
@@ -74,13 +74,17 @@ def render_sidebar() -> None:
                 ("Tokens de salida", last_metrics.output_tokens),
             ):
                 st.metric(label, value if value is not None else "No disponible")
+            st.caption(
+                "Origen: caché exact-match" if last_metrics.cache_hit else "Origen: proveedor LLM"
+            )
             elapsed = last_metrics.response_seconds
             st.metric(
                 "Tiempo de respuesta",
                 f"{elapsed:.2f} s" if elapsed is not None else "No disponible",
             )
             st.caption(
-                "Tiempo total de generación. Los tokens de entrada incluyen el prompt, "
+                "Tiempo total de respuesta. En un acierto de caché, los tokens corresponden "
+                "a la generación original. Los tokens de entrada incluyen el prompt, "
                 "el contexto CAG y la transcripción. Si el proveedor no informa del uso, "
                 "se muestra «No disponible»."
             )

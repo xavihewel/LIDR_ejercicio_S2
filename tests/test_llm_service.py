@@ -17,12 +17,14 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.settings_patch.start()
         self.addCleanup(self.settings_patch.stop)
-        self.client_patch = patch("app.services.llm_service.AsyncOpenAI")
-        self.client_factory = self.client_patch.start()
+        self.client_patch = patch("app.services.llm_service.complete", new_callable=AsyncMock)
+        self.create = self.client_patch.start()
         self.addCleanup(self.client_patch.stop)
-        self.client = self.client_factory.return_value.__aenter__.return_value
-        self.create = AsyncMock()
-        self.client.chat.completions.create = self.create
+        self.cache_patch = patch("app.services.llm_service.LLMCache")
+        self.cache = self.cache_patch.start().return_value
+        self.addCleanup(self.cache_patch.stop)
+        self.cache.get = AsyncMock(return_value=None)
+        self.cache.set = AsyncMock()
         self.create.return_value = SimpleNamespace(choices=[SimpleNamespace(
             finish_reason="stop", message=SimpleNamespace(content="Estimación generada")
         )])
@@ -30,8 +32,8 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_examples_and_transcription_in_separate_roles(self):
         transcript = "Necesitamos una aplicación para gestionar cursos."
         self.assertEqual(await generate_estimation(transcript), "Estimación generada")
-        request = self.create.call_args.kwargs
-        self.assertEqual(request["model"], self.settings.llm_model)
+        request = {"messages": self.create.call_args.args[1], **self.create.call_args.kwargs}
+        self.assertIs(self.create.call_args.args[0], self.settings)
         system, user = request["messages"]
         self.assertEqual(system["role"], "system")
         self.assertEqual(user, {"role": "user", "content": transcript})
@@ -42,7 +44,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_blank_transcription_without_calling_api(self):
         with self.assertRaises(ValueError):
             await generate_estimation(" \n ")
-        self.client_factory.assert_not_called()
+        self.create.assert_not_awaited()
 
     async def test_stream_yields_chunks_before_generation_finishes(self):
         chunks = [
@@ -67,12 +69,11 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         metrics = EstimationMetrics()
         result = stream_estimation("Una reunión", metrics=metrics)
         self.assertEqual(await anext(result), "Estimación ")
-        stream.__aexit__.assert_not_awaited()
+        stream.aclose.assert_not_awaited()
         self.assertEqual([text async for text in result], ["generada"])
-        stream.__aexit__.assert_awaited_once()
-        request = self.create.call_args.kwargs
+        stream.aclose.assert_awaited_once()
+        request = {"messages": self.create.call_args.args[1], **self.create.call_args.kwargs}
         self.assertTrue(request["stream"])
-        self.assertEqual(request["stream_options"], {"include_usage": True})
         self.assertEqual(metrics.model, "resolved-model")
         self.assertEqual(metrics.input_tokens, 321)
         self.assertEqual(metrics.output_tokens, 54)
@@ -91,12 +92,12 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
                 self.create.return_value = stream
                 with self.assertRaises(RuntimeError):
                     _ = [text async for text in stream_estimation("Una reunión")]
-                stream.__aexit__.assert_awaited_once()
+                stream.aclose.assert_awaited_once()
 
     async def test_stream_rejects_blank_input_without_api_call(self):
         with self.assertRaises(ValueError):
             _ = [text async for text in stream_estimation(" \n ")]
-        self.client_factory.assert_not_called()
+        self.create.assert_not_awaited()
 
     async def test_stream_does_not_reuse_token_counts_when_usage_is_missing(self):
         metrics = EstimationMetrics(
@@ -119,11 +120,15 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(metrics.output_tokens)
         self.assertEqual(metrics.model, self.settings.llm_model)
 
-    async def test_rejects_unsupported_provider(self):
-        self.settings.llm_provider = "anthropic"
-        with self.assertRaises(ValueError):
-            await generate_estimation("Una reunión")
-        self.client_factory.assert_not_called()
+    async def test_accepts_anthropic_provider(self):
+        self.settings = Settings(
+            _env_file=None, llm_provider="anthropic", anthropic_api_key="test-only",
+            llm_model="claude-test",
+        )
+        self.settings_patch.stop()
+        with patch("app.services.llm_service.get_settings", return_value=self.settings):
+            self.assertEqual(await generate_estimation("Una reunión"), "Estimación generada")
+        self.assertIs(self.create.call_args.args[0], self.settings)
 
     async def test_rejects_empty_or_incomplete_responses(self):
         for choices in (
@@ -135,3 +140,81 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
                 self.create.return_value = SimpleNamespace(choices=choices)
                 with self.assertRaises(RuntimeError):
                     await generate_estimation("Una reunión")
+
+    async def test_cached_response_skips_provider_in_both_modes(self):
+        from app.services.llm_cache import CachedEstimation
+        self.cache.get.return_value = CachedEstimation(
+            content="Guardada", model="resolved", tokens_in=30, tokens_out=4
+        )
+        self.assertEqual(await generate_estimation("Una reunión"), "Guardada")
+        metrics = EstimationMetrics()
+        self.assertEqual([part async for part in stream_estimation("Una reunión", metrics=metrics)], ["Guardada"])
+        self.assertTrue(metrics.cache_hit)
+        self.assertEqual(metrics.model, "resolved")
+        self.assertEqual(metrics.input_tokens, 30)
+        self.create.assert_not_awaited()
+        self.cache.set.assert_not_awaited()
+
+    async def test_complete_response_is_saved_but_invalid_responses_are_not(self):
+        await generate_estimation("Una reunión")
+        self.assertEqual(self.cache.set.call_args.args[1].content, "Estimación generada")
+        self.cache.set.reset_mock()
+        self.create.return_value.choices[0].finish_reason = "length"
+        with self.assertRaises(RuntimeError):
+            await generate_estimation("Una reunión")
+        self.cache.set.assert_not_awaited()
+
+    async def test_stream_is_saved_only_after_successful_completion(self):
+        stream = AsyncMock()
+        stream.__aiter__.return_value = [SimpleNamespace(choices=[SimpleNamespace(
+            delta=SimpleNamespace(content="Completa"), finish_reason="stop"
+        )])]
+        self.create.return_value = stream
+        result = stream_estimation("Una reunión")
+        self.assertEqual(await anext(result), "Completa")
+        self.cache.set.assert_not_awaited()
+        self.assertEqual([part async for part in result], [])
+        self.assertEqual(self.cache.set.call_args.args[1].content, "Completa")
+        self.cache.set.reset_mock()
+        stream.__aiter__.return_value[0].choices[0].finish_reason = "length"
+        with self.assertRaises(RuntimeError):
+            _ = [part async for part in stream_estimation("Una reunión")]
+        self.cache.set.assert_not_awaited()
+
+    async def test_cancelled_stream_is_not_cached(self):
+        stream = AsyncMock()
+        stream.__aiter__.return_value = [SimpleNamespace(choices=[SimpleNamespace(
+            delta=SimpleNamespace(content="Parcial"), finish_reason=None
+        )])]
+        self.create.return_value = stream
+        result = stream_estimation("Una reunión")
+        await anext(result)
+        await result.aclose()
+        stream.aclose.assert_awaited_once()
+        self.cache.set.assert_not_awaited()
+
+    async def test_disabled_cache_calls_provider_without_reading_or_writing(self):
+        self.settings.cache_enabled = False
+        self.assertEqual(await generate_estimation("Una reunión"), "Estimación generada")
+        self.cache.get.assert_not_awaited()
+        self.cache.set.assert_not_awaited()
+
+    async def test_complete_cache_is_shared_with_streaming(self):
+        from app.services.llm_cache import LLMCache
+        from unittest.mock import MagicMock
+        storage = {}
+        redis = MagicMock()
+        redis.get = AsyncMock(side_effect=lambda key: storage.get(key))
+        redis.setex = AsyncMock(side_effect=lambda key, ttl, raw: storage.__setitem__(key, raw))
+        with patch("app.services.llm_service.LLMCache", LLMCache), patch(
+            "app.services.llm_cache.Redis.from_url"
+        ) as factory:
+            factory.return_value.__aenter__.return_value = redis
+            await generate_estimation("Una reunión")
+            metrics = EstimationMetrics()
+            result = [part async for part in stream_estimation("Una reunión", metrics=metrics)]
+            self.assertEqual(result, ["Estimación generada"])
+            self.assertTrue(metrics.cache_hit)
+            self.create.assert_awaited_once()
+            await generate_estimation("Una reunión ")
+            self.assertEqual(self.create.await_count, 2)
