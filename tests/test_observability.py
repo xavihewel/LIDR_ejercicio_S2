@@ -44,19 +44,19 @@ class EstimationLoggingTests(unittest.IsolatedAsyncioTestCase):
         settings = Settings(_env_file=None, openai_api_key="secret-key", cache_enabled=False)
         with patch("app.services.llm_service.get_settings", return_value=settings), patch(
             "app.services.llm_service.complete", new_callable=AsyncMock,
-            side_effect=RuntimeError("private transcript secret-key"),
+            side_effect=RuntimeError("private transcript about a mobile app secret-key"),
         ), capture_logs() as events:
             with self.assertRaises(RuntimeError):
-                await generate_estimation("private transcript")
+                await generate_estimation("private transcript about a mobile app")
             with self.assertRaises(RuntimeError):
-                _ = [part async for part in stream_estimation("private transcript")]
+                _ = [part async for part in stream_estimation("private transcript about a mobile app")]
         failures = [e for e in events if e["event"] == "estimation_failed"]
         self.assertEqual(len(failures), 2)
         for event in failures:
             self.assertEqual(event["error_type"], "RuntimeError")
             self.assertEqual(event["provider"], "openai")
             self.assertGreaterEqual(event["duration_seconds"], 0)
-        self.assertNotIn("private transcript", json.dumps(events))
+        self.assertNotIn("private transcript about a mobile app", json.dumps(events))
         self.assertNotIn("secret-key", json.dumps(events))
 
     async def test_success_logs_usage_and_cache_hit_without_counting_a_new_call(self):
@@ -73,9 +73,9 @@ class EstimationLoggingTests(unittest.IsolatedAsyncioTestCase):
             cache = factory.return_value
             cache.get = AsyncMock(return_value=None)
             cache.set = AsyncMock()
-            await generate_estimation("Input")
+            await generate_estimation("Input describing a mobile application")
             cache.get.return_value = CachedEstimation(content="Answer", model="resolved", tokens_in=12, tokens_out=3)
-            _ = [part async for part in stream_estimation("Input")]
+            _ = [part async for part in stream_estimation("Input describing a mobile application")]
         completed = [e for e in events if e["event"] == "estimation_completed"]
         self.assertEqual([e["cache_hit"] for e in completed], [False, True])
         for event in completed:
@@ -93,7 +93,7 @@ class EstimationLoggingTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.services.llm_service.get_settings", return_value=settings), patch(
             "app.services.llm_service.complete", new_callable=AsyncMock, return_value=upstream
         ), capture_logs() as events:
-            result = stream_estimation("Input")
+            result = stream_estimation("Input describing a mobile application")
             await anext(result)
             await result.aclose()
         self.assertEqual([e["event"] for e in events], ["estimation_cancelled"])

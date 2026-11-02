@@ -1,203 +1,147 @@
 # Estimador CAG
 
-Las directrices de desarrollo están en `AGENTS.md`. Para los cambios de
-comportamiento se sigue TDD: reproducir el caso con una prueba que falle,
-implementar la corrección y refactorizar con las pruebas en verde.
-Para ejecutar las pruebas sin llamadas reales al LLM:
+Servicio FastAPI de estimación de software con LiteLLM, ejemplos CAG,
+plantillas Jinja2, caché exact-match Redis y logs JSON con structlog.
+El cliente Streamlit usa un formulario y consume el servicio por HTTP.
+
+Las directrices de desarrollo están en `AGENTS.md`. Se sigue TDD para los
+cambios de comportamiento. Las pruebas no necesitan proveedores ni Redis reales:
 
 ```sh
+uv sync
 uv run python -m unittest discover -s tests -v
 ```
 
-```text
-estimador-cag/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── config.py
-│   ├── routers/
-│   │   ├── __init__.py
-│   │   └── estimations.py
-│   ├── services/
-│   │   ├── __init__.py
-│   │   ├── llm_provider.py
-│   │   └── llm_service.py
-│   └── context/
-│       ├── __init__.py
-│       └── examples.py
-├── .env
-├── .env.example
-├── .gitignore
-├── pyproject.toml
-├── streamlit_app.py
-└── README.md
-```
+## Arranque
 
-`main.py` crea la aplicación FastAPI y registra los routers. `config.py`
-define la configuración mediante variables de entorno y `.env`.
-`.env` es local y está excluido de Git; `.env.example` sirve como plantilla.
-
-Los routers gestionan HTTP y delegan la lógica de negocio en los servicios.
-Los servicios preparan el prompt con los datos estáticos de `context/` y llaman
-al LLM. La dirección de dependencias es `routers → services → context`.
-Esta separación es una decisión arquitectónica deliberada para facilitar
-la evolución y las pruebas independientes de cada responsabilidad.
-
-`POST /api/v1/estimate` recibe una transcripción y devuelve la estimación,
-el modelo y el proveedor configurados. El servicio incluye los ejemplos
-de `context/` directamente en el mensaje de sistema. El wrapper
-`llm_provider.py` utiliza `litellm.acompletion` para abstraer OpenAI y Anthropic,
-tanto en respuestas completas como en streaming.
-
-Para arrancar en desarrollo:
-
-```sh
-uv sync
-uv run uvicorn app.main:app --reload
-```
-
-Con el servidor arrancado y una clave válida configurada en `.env`, puedes
-probar el endpoint mediante curl (realiza una llamada real al proveedor configurado):
-
-```sh
-curl -X POST http://127.0.0.1:8000/api/v1/estimate \
-  -H 'Content-Type: application/json' \
-  -d '{"transcription":"En la reunión con el cliente se discutió la necesidad de una plataforma de gestión de inventario con autenticación y un panel de métricas."}'
-```
-
-La respuesta JSON contiene `estimation`, `model` y `provider`. Las peticiones
-sin una transcripción de texto no vacía reciben un error 422. Los errores de
-configuración devuelven 503; los del proveedor, 502 o 504 si agota el tiempo.
-La documentación interactiva está disponible en `http://127.0.0.1:8000/docs`.
-
-Configura `OPENAI_API_KEY` en tu `.env` local. La plantilla `.env.example`
-documenta todas las variables sin incluir valores. Se usa OpenAI por defecto,
-con `LLM_MODEL=gpt-4o-mini`, `APP_ENV=development` y `LOG_LEVEL=DEBUG`.
-Los valores vacíos permiten aplicar los valores por defecto.
-`ANTHROPIC_API_KEY` solo es obligatoria si seleccionas `LLM_PROVIDER=anthropic`.
-Al cambiar de proveedor, configura también un `LLM_MODEL` compatible disponible
-en tu cuenta. Por ejemplo, para Anthropic:
+Copia `.env.example` a `.env` y configura el proveedor, modelo y clave del
+servicio. `.env` está excluido de Git.
 
 ```dotenv
-LLM_PROVIDER=anthropic
-LLM_MODEL=claude-sonnet-4-5-20250929
-ANTHROPIC_API_KEY=tu-clave-local
-```
-
-El wrapper pasa explícitamente el proveedor y su clave a LiteLLM; no modifica
-las variables de entorno ni necesita la clave del otro proveedor.
-
-Para usar el chat de Streamlit:
-
-```sh
-uv sync
-uv run streamlit run streamlit_app.py
-```
-
-Abre `http://localhost:8501` y escribe o pega una transcripción en el chat.
-La estimación aparece progresivamente con `st.write_stream` como mensaje del
-asistente y el historial se mantiene
-visible durante la sesión mediante `st.session_state`. Cada transcripción
-se estima de forma independiente. El chat llama directamente a
-`stream_estimation` del servicio LLM compartido con el endpoint CAG y utiliza
-exactamente su system prompt y sus ejemplos. No necesita arrancar FastAPI.
-Configura el proveedor, su modelo y su clave en `.env`, como se indica arriba.
-
-El panel lateral muestra el system prompt completo en solo lectura y las
-estimaciones de ejemplo que forman el contexto CAG. Tras cada envío muestra
-el modelo, los tokens de entrada y salida informados por el proveedor y el
-tiempo total de generación en segundos. Las métricas se conservan durante
-la sesión; si una llamada falla o no informa del consumo, los tokens aparecen
-como «No disponible», sin reutilizar cifras de una llamada anterior.
-
-Los servicios pueden obtener la configuración validada con
-`from app.config import get_settings`. La configuración se carga una vez al
-llamar a `get_settings()` y las claves se representan ocultas mediante `SecretStr`.
-
-## Caché exact-match con Redis
-
-FastAPI y Streamlit comparten una caché Redis de estimaciones completas, con
-TTL de 24 horas. Configuración en `.env`:
-
-```dotenv
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+OPENAI_API_KEY=tu-clave-local
 REDIS_URL=redis://localhost:6379
 CACHE_TTL=86400
 CACHE_ENABLED=true
+LOG_LEVEL=INFO
+ESTIMATION_API_URL=http://localhost:8000
 ```
 
-`CACHE_TTL` se expresa en segundos y debe ser positivo. Para arrancar Redis
-localmente con Docker:
+Para Anthropic, usa `LLM_PROVIDER=anthropic`, un modelo compatible disponible
+en tu cuenta y `ANTHROPIC_API_KEY`. Solo es necesaria la clave del proveedor
+seleccionado. El wrapper pasa proveedor y credenciales explícitamente a LiteLLM.
+
+Arranca el servicio y el cliente en terminales separadas:
+
+```sh
+uv run uvicorn app.main:app --reload
+```
+
+```sh
+uv run streamlit run streamlit_app.py
+```
+
+Abre `http://localhost:8501`. El formulario recoge descripción, tipo de proyecto,
+nivel de detalle y formato de salida. «Enviar» crea un `EstimationRequest`, lo
+serializa con `model_dump(mode="json")` y hace `POST /estimate` a
+`ESTIMATION_API_URL`. El cliente no necesita claves LLM ni conexión directa a
+Redis; puede ejecutarse en otro proceso o equipo. Cambiar campos no envía
+peticiones hasta pulsar «Enviar».
+
+El resultado se muestra como Markdown y se conserva al refrescar los widgets.
+Los errores de validación, conexión, timeout y respuesta inválida se muestran
+en la interfaz. El formulario espera la respuesta completa; el servicio sigue
+ofreciendo generación en streaming como función Python compartida.
+
+## Contrato Pydantic v2
+
+La fuente única es `app/schemas/estimation.py`, reexportada por `app.schemas`
+y reutilizada por el cliente. Los cuatro campos de entrada son obligatorios:
+
+| Campo | Valores |
+| --- | --- |
+| `description` | Texto de 20 a 2000 caracteres; no puede contener solo espacios |
+| `project_type` | `software`, `mobile_app`, `web_saas`, `internal_tool`, `data_pipeline` |
+| `detail_level` | `summary`, `medium`, `detailed` |
+| `output_format` | `phases_table`, `line_items`, `narrative` |
+
+```sh
+curl -X POST http://localhost:8000/estimate \
+  -H 'Content-Type: application/json' \
+  -d '{"description":"Aplicación móvil con login, chat y notificaciones push.","project_type":"mobile_app","detail_level":"detailed","output_format":"phases_table"}'
+```
+
+Respuesta:
+
+```json
+{
+  "text": "## Estimación\n\nTexto libre generado por el modelo...",
+  "prompt_version": "v1"
+}
+```
+
+`text` sigue siendo texto libre: no se valida todavía un desglose estructurado.
+La API valida el contrato antes de llamar al proveedor. Entradas inválidas
+reciben 422; configuración incorrecta, 503; errores del proveedor, 502;
+timeout del proveedor, 504. `/api/v1/estimate` permanece como alias del endpoint,
+con el mismo contrato nuevo. El anterior cuerpo con `transcription` y la
+respuesta con `estimation`, `model` y `provider` se sustituyen por este contrato.
+
+`GET /health` no consulta al proveedor y funciona sin claves LLM. La documentación
+OpenAPI del contrato está en `http://localhost:8000/docs`.
+
+## Prompts y servicio
+
+`app/prompts/loader.py` expone:
+
+```python
+render_estimation_prompt(request, version="v1") -> tuple[str, str]
+```
+
+Devuelve `(system, user)` listos para enviar al modelo. Usa Jinja2 con
+`StrictUndefined`, `trim_blocks=True` y `lstrip_blocks=True`. Cada versión vive
+en `app/prompts/estimation/<version>/` y contiene `system.j2`, `user.j2` y
+`examples.j2`. `{% include examples_template %}` selecciona los ejemplos de la
+misma versión. El contexto CAG procede de `app/context/examples.py`.
+
+El servicio renderiza mensajes separados para sistema y usuario, incluyendo la
+descripción dentro de `<project_description>`. Las opciones del formulario
+controlan el tipo de proyecto, detalle y formato. LiteLLM abstrae OpenAI y
+Anthropic tanto en generación completa como en streaming. La dirección de las
+dependencias es `router → servicio → loader/proveedor/caché`; Streamlit solo
+importa el contrato y usa HTTP.
+
+## Caché exact-match
+
+Para arrancar Redis localmente:
 
 ```sh
 docker run --name estimador-redis -p 6379:6379 -d redis:7-alpine
 ```
 
-La clave es un SHA-256 de los mensajes completos (incluidos el system prompt
-y todos los ejemplos), el modelo y el proveedor. Solo las entradas idénticas
-reutilizan la respuesta; cualquier cambio en el contexto, modelo, proveedor
-o texto genera otra clave. Los espacios del texto se conservan; las entradas
-vacías o compuestas solo por espacios se rechazan.
+La clave es un SHA-256 de los mensajes renderizados completos, modelo y
+proveedor. Cualquier cambio en descripción, opciones o plantillas que afecte
+los mensajes genera otra clave. Se conservan los espacios de la descripción.
+Los modos completo y streaming comparten la caché, con TTL de 86400 segundos
+por defecto. `CACHE_TTL` debe ser positivo; `CACHE_ENABLED=false` desactiva
+lecturas y escrituras.
 
-Solo se guardan respuestas válidas y completas. En streaming, los fragmentos
-se entregan inmediatamente y se guardan juntos al finalizar; las respuestas
-interrumpidas o truncadas no se guardan. Un acierto devuelve el texto guardado
-como un único fragmento y no llama al proveedor. Ambos modos comparten entradas.
-El panel lateral indica si la respuesta procede de caché; los tokens mostrados
-en ese caso son los de la generación original y no un nuevo consumo.
+Solo se guardan respuestas válidas y completas. Un stream truncado o cancelado
+no se guarda. Un acierto no llama al proveedor y devuelve el texto almacenado.
+Si Redis falla o una entrada está corrupta, se continúa con el proveedor.
 
-Si Redis no está disponible o una entrada está corrupta, el servicio continúa
-con el proveedor y registra una advertencia sin incluir transcripciones ni
-credenciales. `CACHE_ENABLED=false` desactiva las lecturas y escrituras.
+## Observabilidad
 
-## Observabilidad básica
+FastAPI emite logs JSON a la salida estándar con structlog. `LOG_LEVEL` controla
+el nivel mínimo. Cada petición tiene un ID generado por el servidor, devuelto
+en `X-Request-ID` y propagado a los logs del servicio y Redis.
 
-FastAPI y Streamlit configuran `structlog` para emitir un objeto JSON por línea
-en la salida estándar. `LOG_LEVEL` en `.env` controla el nivel mínimo
-(`DEBUG`, `INFO`, `WARNING`, `ERROR` o `CRITICAL`). La configuración de logs no
-requiere credenciales LLM, por lo que `/health` sigue funcionando sin ellas.
-
-Cada petición HTTP tiene un identificador generado por el servidor, devuelto
-en `X-Request-ID` y propagado a los logs del servicio y de Redis. Los eventos
-`http_request_completed` y `http_request_failed` registran método, estado cuando
-hay respuesta y duración en segundos; las respuestas completadas incluyen la
-plantilla de ruta cuando está disponible.
-
-`estimation_completed`, `estimation_failed` y `estimation_cancelled` registran
-el modo streaming, proveedor cuando está disponible, modelo, duración,
-`cache_hit` y tokens disponibles. Si `cache_hit=true`, los tokens corresponden
-a la generación original; no representan nuevo consumo. En Streamlit estos
-eventos aparecen en la terminal donde se ejecuta el cliente.
-
-Redis emite `cache_hit`, `cache_miss`, `cache_stored`, `cache_read_failed` y
-`cache_write_failed`. Los fallos de caché tienen nivel WARNING; los errores
-de estimación tienen nivel ERROR. Los logs propios no incluyen prompts,
+Los eventos HTTP registran método, ruta, estado y duración cuando están
+disponibles. Las estimaciones registran proveedor, modelo, duración, modo,
+`cache_hit` y tokens disponibles. Los tokens de un acierto corresponden a la
+generación original, sin nuevo consumo. También se registran cancelaciones,
+fallos de caché y errores de estimación. Los logs propios no incluyen prompts,
 transcripciones, respuestas, claves, URL de Redis ni mensajes de excepción;
-los errores incluyen únicamente `error_type`. Los logs de librerías externas
-mantienen su propia configuración.
-
-## Prompts con plantillas
-
-El servicio compartido utiliza `render_estimation_prompt` de
-`app/prompts/loader.py` tanto para generación completa como para streaming.
-El sistema y el usuario se renderizan desde `app/prompts/v1/`, se envían como
-mensajes separados a LiteLLM y forman parte de la clave de caché. La descripción
-se incluye dentro de `<project_description>`; los ejemplos CAG se incluyen
-solo en el sistema. El panel lateral de Streamlit muestra el sistema por defecto
-renderizado desde estas mismas plantillas.
-
-El endpoint acepta una petición estructurada:
-
-```json
-{
-  "description": "Aplicación móvil con login, chat y notificaciones push.",
-  "project_type": "mobile_app",
-  "detail_level": "detailed",
-  "output_format": "phases_table"
-}
-```
-
-`project_type` admite `software` y `mobile_app`; `detail_level` admite `detailed`;
-`output_format` admite `phases_table` y `narrative`. Los valores por defecto son
-`software`, `detailed` y `phases_table`. Las peticiones existentes con
-`{"transcription": "..."}` siguen funcionando, al igual que el chat de Streamlit.
-La respuesta conserva los campos `estimation`, `model` y `provider`.
+los errores incluyen únicamente `error_type`. Las librerías externas conservan
+su propia configuración de logs.

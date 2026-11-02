@@ -14,6 +14,9 @@ these rules. The examples are references; follow the selected output format.
 {% if output_format == "phases_table" %}
 Return a markdown table with one row per project phase. Required
 columns: phase, duration_weeks, cost_eur, confidence_pct.
+{% elif output_format == "line_items" %}
+Return a list of individual tasks with estimated hours, assumptions and risks.
+Include the total hours and verify that it equals the sum of the task estimates.
 {% elif output_format == "narrative" %}
 Return a flowing prose estimate organised in three paragraphs:
 overview, breakdown by phase, main risks.
@@ -22,9 +25,13 @@ overview, breakdown by phase, main risks.
 
 <detail_level>{{ detail_level }}</detail_level>
 
-{% if detail_level == "detailed" %}
+{% if detail_level == "summary" %}
+Keep the estimate brief and focus on the main phases and overall scope.
+{% elif detail_level == "medium" %}
+Describe each main phase with its main tasks, assumptions and risks.
+{% elif detail_level == "detailed" %}
 For every phase, list the assumptions you made and a confidence
 interval expressed as a percentage range.
 {% endif %}
 
-{% include "v1/examples.j2" %}
+{% include examples_template %}

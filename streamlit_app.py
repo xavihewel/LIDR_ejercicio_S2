@@ -1,112 +1,83 @@
-"""Chat para estimar software a partir de transcripciones de reuniones."""
+"""Formulario cliente del servicio HTTP de estimaciones."""
+from pathlib import Path
 
+import httpx
 import streamlit as st
-from openai import APIError, APITimeoutError
+from pydantic import ValidationError
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.observability import configure_logging
-from app.context.examples import ESTIMATION_EXAMPLES
-from app.services.llm_service import EstimationMetrics, build_system_prompt, stream_estimation
-
-
-def render_history() -> None:
-    """Muestra los turnos guardados sin repetir llamadas al proveedor."""
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+from app.schemas import DetailLevel, EstimationRequest, EstimationResponse, OutputFormat, ProjectType
 
 
-def render_estimation(transcription: str, metrics: EstimationMetrics) -> str:
-    """Muestra el stream y traduce los errores del proveedor para el usuario."""
-    with st.chat_message("assistant"):
-        response = st.empty()
-        with st.spinner("Generando estimación…"):
-            try:
-                with response.container():
-                    estimation = st.write_stream(
-                        stream_estimation(transcription, metrics=metrics)
-                    )
-            except APITimeoutError:
-                estimation = "El proveedor LLM no respondió a tiempo. Vuelve a enviar la transcripción."
-            except (APIError, RuntimeError):
-                estimation = "No se pudo obtener la estimación. Vuelve a intentarlo."
-            except ValueError:
-                estimation = (
-                    "Revisa LLM_PROVIDER, LLM_MODEL y la clave del proveedor "
-                    "(OPENAI_API_KEY o ANTHROPIC_API_KEY) en el archivo .env."
-                )
-        response.markdown(estimation)
-    return estimation
+class ClientSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parent / ".env", extra="ignore", env_ignore_empty=True,
+    )
+    estimation_api_url: str = "http://localhost:8000"
 
 
-def process_transcription(transcription: str) -> None:
-    """Registra un nuevo turno con métricas independientes."""
-    metrics = EstimationMetrics()
-    st.session_state.last_metrics = metrics
-    st.session_state.messages.append({"role": "user", "content": transcription})
-    with st.chat_message("user"):
-        st.markdown(transcription)
+PROJECT_LABELS = {
+    ProjectType.SOFTWARE: "Software general",
+    ProjectType.MOBILE_APP: "Aplicación móvil",
+    ProjectType.WEB_SAAS: "Web / SaaS",
+    ProjectType.INTERNAL_TOOL: "Herramienta interna",
+    ProjectType.DATA_PIPELINE: "Pipeline de datos",
+}
+DETAIL_LABELS = {DetailLevel.SUMMARY: "Resumen", DetailLevel.MEDIUM: "Medio", DetailLevel.DETAILED: "Detallado"}
+FORMAT_LABELS = {OutputFormat.PHASES_TABLE: "Tabla por fases", OutputFormat.LINE_ITEMS: "Listado de tareas", OutputFormat.NARRATIVE: "Narrativo"}
 
-    estimation = render_estimation(transcription, metrics)
-    st.session_state.messages.append({"role": "assistant", "content": estimation})
 
-
-def render_sidebar() -> None:
-    """Muestra el contexto activo y las métricas de la última llamada."""
-    with st.sidebar:
-        st.header("Información del estimador")
-        with st.expander("System prompt activo"):
-            st.caption("Mensaje de sistema completo enviado al modelo, incluidos los ejemplos.")
-            st.code(build_system_prompt(), language=None, wrap_lines=True)
-
-        with st.expander("Contexto estático CAG"):
-            for index, example in enumerate(ESTIMATION_EXAMPLES, start=1):
-                st.subheader(f"Ejemplo {index}")
-                st.markdown(example["meeting_summary"])
-                st.markdown(example["estimation"].strip())
-
-        st.subheader("Última llamada")
-        last_metrics = st.session_state.get("last_metrics")
-        if last_metrics is None:
-            st.caption("Las métricas aparecerán después de enviar una transcripción.")
-        else:
-            st.metric("Modelo utilizado", last_metrics.model or "No disponible")
-            for label, value in (
-                ("Tokens de entrada", last_metrics.input_tokens),
-                ("Tokens de salida", last_metrics.output_tokens),
-            ):
-                st.metric(label, value if value is not None else "No disponible")
-            st.caption(
-                "Origen: caché exact-match" if last_metrics.cache_hit else "Origen: proveedor LLM"
-            )
-            elapsed = last_metrics.response_seconds
-            st.metric(
-                "Tiempo de respuesta",
-                f"{elapsed:.2f} s" if elapsed is not None else "No disponible",
-            )
-            st.caption(
-                "Tiempo total de respuesta. En un acierto de caché, los tokens corresponden "
-                "a la generación original. Los tokens de entrada incluyen el prompt, "
-                "el contexto CAG y la transcripción. Si el proveedor no informa del uso, "
-                "se muestra «No disponible»."
-            )
+def submit_estimation(request: EstimationRequest) -> EstimationResponse:
+    """Envía únicamente el contrato JSON; el cliente no necesita claves LLM."""
+    endpoint = f"{ClientSettings().estimation_api_url.rstrip('/')}/estimate"
+    response = httpx.post(endpoint, json=request.model_dump(mode="json"), timeout=120.0)
+    response.raise_for_status()
+    return EstimationResponse.model_validate(response.json())
 
 
 def main() -> None:
-    configure_logging()
-    st.set_page_config(page_title="Estimador CAG", page_icon="💬")
+    st.set_page_config(page_title="Estimador CAG", page_icon="📝")
     st.title("Estimador de software")
-    st.write("Escribe o pega la transcripción de una reunión para obtener su estimación.")
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    st.write("Describe tu proyecto y selecciona cómo quieres recibir la estimación.")
+    with st.form("estimation_form"):
+        description = st.text_area("Descripción del proyecto", max_chars=2000, height=180, help="Entre 20 y 2000 caracteres.")
+        project_type = st.selectbox("Tipo de proyecto", list(ProjectType), format_func=PROJECT_LABELS.get)
+        detail_level = st.selectbox("Nivel de detalle", list(DetailLevel), index=2, format_func=DETAIL_LABELS.get)
+        output_format = st.selectbox("Formato de salida", list(OutputFormat), format_func=FORMAT_LABELS.get)
+        submitted = st.form_submit_button("Enviar")
 
-    render_history()
-    transcription = st.chat_input("Escribe o pega la transcripción de la reunión")
-    if transcription is not None:
-        if transcription.strip():
-            process_transcription(transcription)
+    if submitted:
+        st.session_state.pop("estimation_result", None)
+        try:
+            request = EstimationRequest(
+                description=description, project_type=project_type,
+                detail_level=detail_level, output_format=output_format,
+            )
+        except ValidationError:
+            st.error("Introduce una descripción de entre 20 y 2000 caracteres, con contenido.")
         else:
-            st.warning("La transcripción no puede estar vacía.")
-    render_sidebar()
+            with st.spinner("Generando estimación…"):
+                try:
+                    st.session_state.estimation_result = submit_estimation(request)
+                except httpx.TimeoutException:
+                    st.error("El servicio no respondió a tiempo. Vuelve a intentarlo.")
+                except httpx.HTTPStatusError as exc:
+                    messages = {
+                        422: "El servicio rechazó los datos. Revisa el formulario.",
+                        502: "No se pudo obtener una estimación del proveedor.",
+                        503: "El servicio de estimaciones no está disponible.",
+                        504: "El proveedor no respondió a tiempo. Vuelve a intentarlo.",
+                    }
+                    st.error(messages.get(exc.response.status_code, "No se pudo obtener la estimación."))
+                except httpx.RequestError:
+                    st.error("No se pudo conectar con el servicio de estimaciones.")
+                except ValueError:
+                    st.error("El servicio devolvió una respuesta con un formato inesperado.")
+
+    result = st.session_state.get("estimation_result")
+    if result is not None:
+        st.subheader("Estimación")
+        st.markdown(result.text)
 
 
 if __name__ == "__main__":

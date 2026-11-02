@@ -10,7 +10,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from app.observability import observe_estimation
 from app.config import Settings, get_settings
 from app.prompts.loader import render_estimation_prompt
-from app.schemas import EstimationRequest
+from app.schemas import DetailLevel, EstimationRequest, OutputFormat, ProjectType
 from app.services.llm_provider import complete
 from app.services.llm_cache import CachedEstimation, LLMCache
 
@@ -28,7 +28,7 @@ class EstimationMetrics:
 
 def build_system_prompt() -> str:
     """Devuelve el sistema de la plantilla usada por defecto en Streamlit."""
-    system, _ = render_estimation_prompt(EstimationRequest(description="Vista previa"))
+    system, _ = render_estimation_prompt(_estimation_request("Vista previa del sistema de estimación"))
     return system
 
 
@@ -39,12 +39,17 @@ def _estimation_settings(transcription: str | EstimationRequest) -> Settings:
 
 
 def _estimation_request(value: str | EstimationRequest) -> EstimationRequest:
-    return value if isinstance(value, EstimationRequest) else EstimationRequest(description=value)
+    return value if isinstance(value, EstimationRequest) else EstimationRequest(
+        description=value, project_type=ProjectType.SOFTWARE,
+        detail_level=DetailLevel.DETAILED, output_format=OutputFormat.PHASES_TABLE,
+    )
 
 
-def _estimation_messages(transcription: str | EstimationRequest) -> list[ChatCompletionMessageParam]:
+def _estimation_messages(
+    transcription: str | EstimationRequest, *, prompt: tuple[str, str] | None = None
+) -> list[ChatCompletionMessageParam]:
     """Renderiza el mismo prompt para ambos modos y para la clave de caché."""
-    system, user = render_estimation_prompt(_estimation_request(transcription))
+    system, user = prompt if prompt is not None else render_estimation_prompt(_estimation_request(transcription))
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -109,7 +114,10 @@ async def _stream_estimation(
         metrics.response_seconds = perf_counter() - started
 
 
-async def _generate_estimation(transcription: str | EstimationRequest, metrics: EstimationMetrics) -> str:
+async def _generate_estimation(
+    transcription: str | EstimationRequest, metrics: EstimationMetrics,
+    *, prompt: tuple[str, str] | None = None,
+) -> str:
     """Envía contexto y transcripción al proveedor configurado y devuelve la estimación.
 
     Rechaza transcripciones vacías y respuestas sin texto o incompletas.
@@ -118,7 +126,7 @@ async def _generate_estimation(transcription: str | EstimationRequest, metrics: 
     settings = _estimation_settings(transcription)
 
     metrics.model = settings.llm_model
-    messages = _estimation_messages(transcription)
+    messages = _estimation_messages(transcription, prompt=prompt)
     cache = LLMCache(settings.redis_url, settings.cache_ttl)
     key = cache.cache_key(messages, settings.llm_model, settings.llm_provider)
     cached = await cache.get(key) if settings.cache_enabled else None
@@ -151,12 +159,14 @@ async def _generate_estimation(transcription: str | EstimationRequest, metrics: 
     return content
 
 
-async def generate_estimation(transcription: str | EstimationRequest) -> str:
+async def generate_estimation(
+    transcription: str | EstimationRequest, *, prompt: tuple[str, str] | None = None
+) -> str:
     """Genera una estimación y registra duración, consumo y resultado."""
     metrics = EstimationMetrics()
     with observe_estimation(metrics, streaming=False) as fields:
         fields["provider"] = get_settings().llm_provider
-        return await _generate_estimation(transcription, metrics)
+        return await _generate_estimation(transcription, metrics, prompt=prompt)
 
 
 async def stream_estimation(

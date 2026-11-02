@@ -19,6 +19,6 @@ class AppTests(unittest.TestCase):
             schema = client.get("/openapi.json").json()
         self.assertEqual(schema["info"]["title"], "Estimador CAG")
         self.assertTrue(schema["info"]["description"])
-        self.assertIn("post", schema["paths"]["/api/v1/estimate"])
+        self.assertIn("post", schema["paths"]["/estimate"])
         self.assertIn("get", schema["paths"]["/health"])
         self.assertNotIn("/api/v1/api/v1/estimate", schema["paths"])

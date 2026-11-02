@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from openai import APIError, APITimeoutError
 
 from app.schemas import EstimationRequest, EstimationResponse
-from app.config import get_settings
+from app.prompts.loader import DEFAULT_PROMPT_VERSION, render_estimation_prompt
 from app.services.llm_service import generate_estimation
 
 router = APIRouter(tags=["estimations"])
@@ -13,8 +13,8 @@ router = APIRouter(tags=["estimations"])
 async def estimate(request: EstimationRequest) -> EstimationResponse:
     """Genera una estimación a partir de la transcripción de una reunión."""
     try:
-        settings = get_settings()
-        estimation = await generate_estimation(request)
+        system, user = render_estimation_prompt(request)
+        estimation = await generate_estimation(request, prompt=(system, user))
     except APITimeoutError as exc:
         raise HTTPException(
             status_code=504, detail="El proveedor LLM no respondió a tiempo."
@@ -29,7 +29,6 @@ async def estimate(request: EstimationRequest) -> EstimationResponse:
         ) from exc
 
     return EstimationResponse(
-        estimation=estimation,
-        model=settings.llm_model,
-        provider=settings.llm_provider,
+        text=estimation,
+        prompt_version=DEFAULT_PROMPT_VERSION,
     )

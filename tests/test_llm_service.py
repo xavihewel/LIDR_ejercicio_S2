@@ -68,7 +68,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             usage=SimpleNamespace(prompt_tokens=321, completion_tokens=54),
         ))
         metrics = EstimationMetrics()
-        result = stream_estimation("Una reunión", metrics=metrics)
+        result = stream_estimation("Una reunión sobre una aplicación móvil", metrics=metrics)
         self.assertEqual(await anext(result), "Estimación ")
         stream.aclose.assert_not_awaited()
         self.assertEqual([text async for text in result], ["generada"])
@@ -79,7 +79,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics.input_tokens, 321)
         self.assertEqual(metrics.output_tokens, 54)
         self.assertGreaterEqual(metrics.response_seconds, 0)
-        self.assertIn("<project_description>\nUna reunión\n</project_description>", request["messages"][1]["content"])
+        self.assertIn("<project_description>\nUna reunión sobre una aplicación móvil\n</project_description>", request["messages"][1]["content"])
         for example in ESTIMATION_EXAMPLES:
             self.assertIn(example["meeting_summary"], request["messages"][0]["content"])
 
@@ -92,7 +92,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
                 )])]
                 self.create.return_value = stream
                 with self.assertRaises(RuntimeError):
-                    _ = [text async for text in stream_estimation("Una reunión")]
+                    _ = [text async for text in stream_estimation("Una reunión sobre una aplicación móvil")]
                 stream.aclose.assert_awaited_once()
 
     async def test_stream_rejects_blank_input_without_api_call(self):
@@ -114,7 +114,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.create.return_value = stream
 
         self.assertEqual(
-            [text async for text in stream_estimation("Otra reunión", metrics=metrics)],
+            [text async for text in stream_estimation("Otra reunión sobre una aplicación móvil", metrics=metrics)],
             ["Nueva estimación"],
         )
         self.assertIsNone(metrics.input_tokens)
@@ -128,7 +128,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.settings_patch.stop()
         with patch("app.services.llm_service.get_settings", return_value=self.settings):
-            self.assertEqual(await generate_estimation("Una reunión"), "Estimación generada")
+            self.assertEqual(await generate_estimation("Una reunión sobre una aplicación móvil"), "Estimación generada")
         self.assertIs(self.create.call_args.args[0], self.settings)
 
     async def test_rejects_empty_or_incomplete_responses(self):
@@ -140,16 +140,16 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(choices=choices):
                 self.create.return_value = SimpleNamespace(choices=choices)
                 with self.assertRaises(RuntimeError):
-                    await generate_estimation("Una reunión")
+                    await generate_estimation("Una reunión sobre una aplicación móvil")
 
     async def test_cached_response_skips_provider_in_both_modes(self):
         from app.services.llm_cache import CachedEstimation
         self.cache.get.return_value = CachedEstimation(
             content="Guardada", model="resolved", tokens_in=30, tokens_out=4
         )
-        self.assertEqual(await generate_estimation("Una reunión"), "Guardada")
+        self.assertEqual(await generate_estimation("Una reunión sobre una aplicación móvil"), "Guardada")
         metrics = EstimationMetrics()
-        self.assertEqual([part async for part in stream_estimation("Una reunión", metrics=metrics)], ["Guardada"])
+        self.assertEqual([part async for part in stream_estimation("Una reunión sobre una aplicación móvil", metrics=metrics)], ["Guardada"])
         self.assertTrue(metrics.cache_hit)
         self.assertEqual(metrics.model, "resolved")
         self.assertEqual(metrics.input_tokens, 30)
@@ -157,12 +157,12 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.cache.set.assert_not_awaited()
 
     async def test_complete_response_is_saved_but_invalid_responses_are_not(self):
-        await generate_estimation("Una reunión")
+        await generate_estimation("Una reunión sobre una aplicación móvil")
         self.assertEqual(self.cache.set.call_args.args[1].content, "Estimación generada")
         self.cache.set.reset_mock()
         self.create.return_value.choices[0].finish_reason = "length"
         with self.assertRaises(RuntimeError):
-            await generate_estimation("Una reunión")
+            await generate_estimation("Una reunión sobre una aplicación móvil")
         self.cache.set.assert_not_awaited()
 
     async def test_stream_is_saved_only_after_successful_completion(self):
@@ -171,7 +171,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             delta=SimpleNamespace(content="Completa"), finish_reason="stop"
         )])]
         self.create.return_value = stream
-        result = stream_estimation("Una reunión")
+        result = stream_estimation("Una reunión sobre una aplicación móvil")
         self.assertEqual(await anext(result), "Completa")
         self.cache.set.assert_not_awaited()
         self.assertEqual([part async for part in result], [])
@@ -179,7 +179,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.cache.set.reset_mock()
         stream.__aiter__.return_value[0].choices[0].finish_reason = "length"
         with self.assertRaises(RuntimeError):
-            _ = [part async for part in stream_estimation("Una reunión")]
+            _ = [part async for part in stream_estimation("Una reunión sobre una aplicación móvil")]
         self.cache.set.assert_not_awaited()
 
     async def test_cancelled_stream_is_not_cached(self):
@@ -188,7 +188,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             delta=SimpleNamespace(content="Parcial"), finish_reason=None
         )])]
         self.create.return_value = stream
-        result = stream_estimation("Una reunión")
+        result = stream_estimation("Una reunión sobre una aplicación móvil")
         await anext(result)
         await result.aclose()
         stream.aclose.assert_awaited_once()
@@ -196,7 +196,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_cache_calls_provider_without_reading_or_writing(self):
         self.settings.cache_enabled = False
-        self.assertEqual(await generate_estimation("Una reunión"), "Estimación generada")
+        self.assertEqual(await generate_estimation("Una reunión sobre una aplicación móvil"), "Estimación generada")
         self.cache.get.assert_not_awaited()
         self.cache.set.assert_not_awaited()
 
@@ -211,13 +211,13 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             "app.services.llm_cache.Redis.from_url"
         ) as factory:
             factory.return_value.__aenter__.return_value = redis
-            await generate_estimation("Una reunión")
+            await generate_estimation("Una reunión sobre una aplicación móvil")
             metrics = EstimationMetrics()
-            result = [part async for part in stream_estimation("Una reunión", metrics=metrics)]
+            result = [part async for part in stream_estimation("Una reunión sobre una aplicación móvil", metrics=metrics)]
             self.assertEqual(result, ["Estimación generada"])
             self.assertTrue(metrics.cache_hit)
             self.create.assert_awaited_once()
-            await generate_estimation("Una reunión ")
+            await generate_estimation("Una reunión sobre una aplicación móvil ")
             self.assertEqual(self.create.await_count, 2)
 
     async def test_loader_messages_are_used_in_complete_and_streaming_modes(self):
