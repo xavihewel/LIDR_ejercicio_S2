@@ -10,7 +10,7 @@ from app.main import app
 from app.schemas import EstimationRequest
 from app.prompts.loader import render_estimation_prompt
 from app.services.output_guardrails import build_estimation_response
-from app.services.sessions import clear_sessions, get_session
+from app.services.sessions import ProjectMetadata, clear_sessions, get_session
 
 PAYLOAD = {
     "description": "Aplicación móvil con login, chat y notificaciones push.",
@@ -32,6 +32,13 @@ class EstimationEndpointTests(unittest.TestCase):
         service = patch("app.routers.estimations.generate_estimation", new_callable=AsyncMock, return_value=PHASES)
         self.service = service.start()
         self.addCleanup(service.stop)
+        extractor = patch(
+            "app.routers.estimations.extract_project_metadata",
+            new_callable=AsyncMock,
+            return_value=ProjectMetadata(project_name="App móvil"),
+        )
+        self.extractor = extractor.start()
+        self.addCleanup(extractor.stop)
         self.addCleanup(clear_sessions)
 
     def test_session_header_binds_the_turn_to_an_existing_session(self):
@@ -44,6 +51,8 @@ class EstimationEndpointTests(unittest.TestCase):
         self.assertEqual(history[0]["role"], "system")
         self.assertEqual(history[1]["role"], "user")
         self.assertEqual(history[2], {"role": "assistant", "content": PHASES})
+        self.extractor.assert_awaited_once()
+        self.assertEqual(get_session(session_id).metadata.project_name, "App móvil")
 
     def test_unknown_session_header_does_not_call_the_llm(self):
         response = self.client.post(
@@ -100,7 +109,7 @@ class EstimationEndpointTests(unittest.TestCase):
             response = self.client.post("/estimate", json=PAYLOAD)
         self.assertEqual(response.status_code, 200)
         request = EstimationRequest.model_validate(PAYLOAD)
-        render.assert_called_once_with(request)
+        render.assert_called_once_with(request, description=None, project_metadata=None)
         self.service.assert_awaited_once_with(request, prompt=("System rules", "User description"))
 
 

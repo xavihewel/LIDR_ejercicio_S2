@@ -65,10 +65,17 @@ def _usable_cache(content: str, request: EstimationRequest) -> bool:
 class _Call:
     """Prepara mensajes, clave de caché y el cliente Redis de una estimación."""
 
-    def __init__(self, request: EstimationRequest, prompt: tuple[str, str] | None):
+    def __init__(
+        self,
+        request: EstimationRequest,
+        prompt: tuple[str, str] | None = None,
+        messages: list[ChatCompletionMessageParam] | None = None,
+    ):
+        if prompt is not None and messages is not None:
+            raise ValueError("Pasa prompt o messages, no ambos.")
         self.request = request
         self.settings = get_settings()
-        self.messages = _messages(request, prompt)
+        self.messages = list(messages) if messages is not None else _messages(request, prompt)
         self.cache = LLMCache(self.settings.redis_url, self.settings.cache_ttl)
         self.key = self.cache.cache_key(
             self.messages, self.settings.llm_model, self.settings.llm_provider
@@ -100,9 +107,10 @@ def _remember_hit(metrics: EstimationMetrics, cached: CachedEstimation) -> None:
 async def _generate_estimation(
     request: EstimationRequest, metrics: EstimationMetrics,
     *, prompt: tuple[str, str] | None = None,
+    messages: list[ChatCompletionMessageParam] | None = None,
 ) -> str:
     """Devuelve el JSON validado. Un acierto no llama al proveedor."""
-    call = _Call(request, prompt)
+    call = _Call(request, prompt=prompt, messages=messages)
     metrics.model = call.settings.llm_model
     cached = await call.read_cache()
     if cached is not None:
@@ -169,14 +177,19 @@ async def _stream_estimation(
 
 
 async def generate_estimation(
-    request: EstimationRequest, *, prompt: tuple[str, str] | None = None
+    request: EstimationRequest,
+    *,
+    prompt: tuple[str, str] | None = None,
+    messages: list[ChatCompletionMessageParam] | None = None,
 ) -> str:
     """Genera el JSON de la estimación y registra duración, consumo y resultado."""
     _require_request(request)
     metrics = EstimationMetrics()
     with observe_estimation(metrics, streaming=False) as fields:
         fields["provider"] = get_settings().llm_provider
-        return await _generate_estimation(request, metrics, prompt=prompt)
+        return await _generate_estimation(
+            request, metrics, prompt=prompt, messages=messages,
+        )
 
 
 async def stream_estimation(

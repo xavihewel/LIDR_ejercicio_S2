@@ -21,5 +21,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(schema["info"]["description"])
         self.assertIn("post", schema["paths"]["/estimate"])
         self.assertIn("post", schema["paths"]["/sessions"])
+        self.assertIn("get", schema["paths"]["/sessions/{session_id}"])
+        self.assertIn("post", schema["paths"]["/sessions/{session_id}/estimate"])
         self.assertIn("get", schema["paths"]["/health"])
         self.assertNotIn("/api/v1/api/v1/estimate", schema["paths"])

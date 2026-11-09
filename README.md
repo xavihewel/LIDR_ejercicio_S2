@@ -42,17 +42,65 @@ uv run uvicorn app.main:app --reload
 uv run streamlit run streamlit_app.py
 ```
 
-Abre `http://localhost:8501`. El formulario recoge descripción, tipo de proyecto,
-nivel de detalle y formato de salida. «Enviar» crea un `EstimationRequest`, lo
-serializa con `model_dump(mode="json")` y hace `POST /estimate` a
-`ESTIMATION_API_URL`. El cliente no necesita claves LLM ni conexión directa a
-Redis; puede ejecutarse en otro proceso o equipo. Cambiar campos no envía
+Abre `http://localhost:8501`. El formulario recoge descripción (transcript), tipo
+de proyecto, nivel de detalle, formato de salida y adjuntos opcionales (PDF,
+TXT, MD). «Enviar» abre `POST /sessions` si aún no hay `session_id`, y luego
+envía `multipart/form-data` a `POST /sessions/{session_id}/estimate`. El cliente
+no necesita claves LLM ni conexión directa a Redis. Cambiar campos no envía
 peticiones hasta pulsar «Enviar».
+
+El panel lateral muestra el `project_metadata` actual (memoria de sesión),
+separado del historial/estimación del panel principal. «Nueva conversación»
+vuelve a llamar a `POST /sessions` y resetea el estado del cliente.
 
 El resultado se muestra como Markdown y se conserva al refrescar los widgets.
 Los errores de validación, conexión, timeout y respuesta inválida se muestran
 en la interfaz. El formulario espera la respuesta completa; el servicio sigue
 ofreciendo generación en streaming como función Python compartida.
+
+## Sesiones y adjuntos (camino B)
+
+`POST /sessions` crea una sesión en memoria del proceso y responde
+`{"session_id": "<uuid-v4>"}`. `GET /sessions/{session_id}` devuelve ese id y el
+`project_metadata` actual. El estado se pierde al reiniciar el servicio
+(sin BBDD ni Redis para el hilo conversacional). La historia usa una ventana
+deslizante de `SESSION_MAX_TURNS` pares user+assistant (6 por defecto); el
+system prompt es invariante y `messages_for_llm()` / `to_messages_list()`
+regeneran el system con el `project_metadata` actual y acotan el historial
+efectivo enviado al LLM.
+
+`POST /sessions/{session_id}/estimate` acepta `multipart/form-data`:
+
+| Campo | Obligatorio | Descripción |
+| --- | --- | --- |
+| `transcript` | sí | Texto 20–2000 caracteres |
+| `project_type`, `detail_level`, `output_format` | sí | Mismos enums que el contrato JSON |
+| `attachments` | no | Hasta 5 ficheros, 5 MB cada uno (`.pdf`, `.txt`, `.md`) |
+
+**Camino B (extracción local):** el servicio extrae el texto con `pypdf` (PDF) o
+UTF-8 (texto/markdown) y lo concatena al transcript con separadores
+`--- attachment: filename ---` antes de renderizar el prompt. Solo viaja texto
+al LLM. Se eligió B frente al multimodal nativo del proveedor para no acoplar
+el wrapper a Files API, controlar qué entra al contexto y dejar lista la
+extracción como primer paso hacia RAG. No se interpretan diagramas embebidos.
+
+`POST /estimate` (JSON) sigue disponible para estimaciones sin ficheros; puede
+llevar cabecera `X-Session-ID` para acumular turnos. Sesión desconocida → 404.
+Adjunto no soportado o demasiado grande → 422.
+
+### Memoria de sesión (`project_metadata`)
+
+Tras cada estimación con sesión, una **segunda llamada al LLM** (extractor)
+devuelve un JSON con `project_name`, `assumed_team_size`,
+`mentioned_technologies` y `agreed_scope`. Ese objeto actualiza
+`session.metadata` y en el siguiente turno se inyecta en el system prompt como
+`<project_metadata>`.
+
+Se eligió el extractor LLM frente a una heurística regex porque los hechos
+salen de prosa libre (transcript, adjuntos y estimación) y el modelo ya valida
+JSON en el flujo principal; la robustez compensa el coste/latencia de un turno
+extra. Si el extractor falla (JSON inválido o error del proveedor), se conserva
+la metadata anterior y la estimación sigue siendo válida.
 
 ## Contrato Pydantic v2
 

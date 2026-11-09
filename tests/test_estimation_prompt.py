@@ -11,6 +11,7 @@ from jinja2 import DictLoader, Environment, StrictUndefined, TemplateNotFound, U
 from app.context.examples import ESTIMATION_EXAMPLES
 from app.prompts.loader import render_estimation_prompt
 from app.schemas import DetailLevel, EstimationRequest, OutputFormat, ProjectType
+from app.services.sessions import ProjectMetadata
 
 
 class EstimationPromptTests(unittest.TestCase):
@@ -34,6 +35,48 @@ class EstimationPromptTests(unittest.TestCase):
         self.assertNotIn(request.description, system)
         self.assertIn("mobile app", system)
         self.assertIn("<detail_level>detailed</detail_level>", system)
+
+    def test_description_override_replaces_request_text_in_user_message(self):
+        request = self.make_request()
+        composed = request.description + "\n\n--- attachment: notes.txt ---\nAlcance"
+        _, user = render_estimation_prompt(request, description=composed)
+        self.assertIn("--- attachment: notes.txt ---", user)
+        self.assertIn("Alcance", user)
+
+    def test_empty_project_metadata_renders_an_empty_block(self):
+        import re
+        system, _ = render_estimation_prompt(self.make_request())
+        self.assertRegex(system, r"<project_metadata>\s*</project_metadata>")
+        self.assertNotIn("<project_name>", system)
+        self.assertNotIn("<assumed_team_size>", system)
+        self.assertNotIn("<mentioned_technologies>", system)
+        self.assertNotIn("<agreed_scope>", system)
+        self.assertIsNone(re.search(r"<project_metadata>\s*<project_", system))
+
+    def test_project_metadata_injects_only_known_facts(self):
+        metadata = ProjectMetadata(
+            project_name="Reservas clínica",
+            assumed_team_size=3,
+            mentioned_technologies=["Python", "Redis"],
+            agreed_scope="MVP con login y calendario",
+        )
+        system, _ = render_estimation_prompt(
+            self.make_request(), project_metadata=metadata,
+        )
+        self.assertIn("<project_name>Reservas clínica</project_name>", system)
+        self.assertIn("<assumed_team_size>3</assumed_team_size>", system)
+        self.assertIn("<technology>Python</technology>", system)
+        self.assertIn("<technology>Redis</technology>", system)
+        self.assertIn("<agreed_scope>MVP con login y calendario</agreed_scope>", system)
+
+        partial = ProjectMetadata(project_name="Inventario")
+        system, _ = render_estimation_prompt(
+            self.make_request(), project_metadata=partial,
+        )
+        self.assertIn("<project_name>Inventario</project_name>", system)
+        self.assertNotIn("<assumed_team_size>", system)
+        self.assertNotIn("<mentioned_technologies>", system)
+        self.assertNotIn("<agreed_scope>", system)
 
     def test_narrative_selects_prose_instead_of_table_instructions(self):
         system, _ = render_estimation_prompt(

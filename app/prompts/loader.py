@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from app.schemas import EstimationRequest
 from app.context.examples import ESTIMATION_EXAMPLES
+from app.services.sessions import ProjectMetadata
 
 logger = structlog.get_logger(__name__)
 
@@ -28,8 +29,15 @@ _env = Environment(
 def render_estimation_prompt(
     request: EstimationRequest,
     version: str = DEFAULT_PROMPT_VERSION,
+    *,
+    description: str | None = None,
+    project_metadata: ProjectMetadata | None = None,
 ) -> tuple[str, str]:
-    """Devuelve los mensajes system y user de estimation/<version>/."""
+    """Devuelve los mensajes system y user de estimation/<version>/.
+
+    `description` opcional sustituye al del request (p. ej. transcript + adjuntos).
+    `project_metadata` vacío deja el bloque <project_metadata> sin hechos.
+    """
     template_dir = f"estimation/{version}"
     system = _env.get_template(f"{template_dir}/system.j2")
     user = _env.get_template(f"{template_dir}/user.j2")
@@ -38,7 +46,8 @@ def render_estimation_prompt(
         "project_type": request.project_type.value,
         "detail_level": request.detail_level.value,
         "output_format": request.output_format.value,
-        "description": request.description,
+        "description": request.description if description is None else description,
+        "project_metadata": project_metadata or ProjectMetadata(),
         "examples": ESTIMATION_EXAMPLES,
         "examples_template": f"{template_dir}/examples.j2",
     }

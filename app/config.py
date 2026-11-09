@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     cache_ttl: int = Field(default=86400, gt=0)
     cache_enabled: bool = True
+    session_max_turns: int = Field(default=6, gt=0)
     app_env: str = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG"
 
