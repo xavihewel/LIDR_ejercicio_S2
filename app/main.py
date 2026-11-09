@@ -7,7 +7,8 @@ from fastapi import FastAPI, Request
 from structlog.contextvars import bound_contextvars
 
 from app.observability import configure_logging
-from app.routers.estimations import router
+from app.routers.estimations import router as estimations_router
+from app.routers.sessions import router as sessions_router
 
 configure_logging()
 logger = structlog.get_logger(__name__)
@@ -15,14 +16,14 @@ logger = structlog.get_logger(__name__)
 app = FastAPI(
     title="Estimador CAG",
     description=(
-        "API de estimación de proyectos de software a partir de transcripciones "
-        "de reuniones. Utiliza un LLM con ejemplos previos incluidos como "
-        "contexto (CAG) para generar un desglose de tareas, horas, equipo "
-        "recomendado y duración estimada."
+        "API de estimación de proyectos de software. Recibe un formulario tipado "
+        "y la descripción del proyecto, y devuelve una estimación validada por schema."
     ),
 )
-app.include_router(router)
-app.include_router(router, prefix="/api/v1", include_in_schema=False)
+app.include_router(estimations_router)
+app.include_router(sessions_router)
+app.include_router(estimations_router, prefix="/api/v1", include_in_schema=False)
+app.include_router(sessions_router, prefix="/api/v1", include_in_schema=False)
 
 
 @app.middleware("http")

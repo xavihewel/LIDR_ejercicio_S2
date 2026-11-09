@@ -36,9 +36,20 @@ class EstimationPromptTests(unittest.TestCase):
         self.assertIn("<detail_level>detailed</detail_level>", system)
 
     def test_narrative_selects_prose_instead_of_table_instructions(self):
-        system, _ = render_estimation_prompt(self.make_request(output_format=OutputFormat.NARRATIVE))
+        system, _ = render_estimation_prompt(
+            self.make_request(output_format=OutputFormat.NARRATIVE), version="v1"
+        )
         self.assertIn("flowing prose", system)
         self.assertNotIn("Required\ncolumns", system)
+
+    def test_default_prompt_asks_for_json_matching_the_selected_format(self):
+        system, user = render_estimation_prompt(self.make_request())
+        self.assertIn("one JSON object", system)
+        self.assertIn("total_duration_weeks", system)
+        self.assertIn("JSON object only", user)
+        narrative, _ = render_estimation_prompt(self.make_request(output_format=OutputFormat.NARRATIVE))
+        self.assertIn('"overview"', narrative)
+        self.assertNotIn("confidence_pct", narrative)
 
     def test_examples_are_rendered_as_context_instead_of_python_source(self):
         system, _ = render_estimation_prompt(self.make_request())
@@ -87,7 +98,7 @@ class EstimationPromptTests(unittest.TestCase):
             _env.cache.clear()
             try:
                 with self.assertRaises(UndefinedError):
-                    render_estimation_prompt(self.make_request())
+                    render_estimation_prompt(self.make_request(), version="v1")
             finally:
                 _env.cache.clear()
 
@@ -159,10 +170,14 @@ class EstimationPromptTests(unittest.TestCase):
         with patch.object(_env, "loader", DictLoader(templates)), capture_logs() as events:
             _env.cache.clear()
             try:
-                render_estimation_prompt(self.make_request())
-                render_estimation_prompt(self.make_request())
-                render_estimation_prompt(self.make_request(description="Another mobile application with chat."))
-                render_estimation_prompt(self.make_request(output_format=OutputFormat.NARRATIVE))
+                render_estimation_prompt(self.make_request(), version="v1")
+                render_estimation_prompt(self.make_request(), version="v1")
+                render_estimation_prompt(
+                    self.make_request(description="Another mobile application with chat."), version="v1"
+                )
+                render_estimation_prompt(
+                    self.make_request(output_format=OutputFormat.NARRATIVE), version="v1"
+                )
             finally:
                 _env.cache.clear()
         hashes = [event["prompt_hash"] for event in events]

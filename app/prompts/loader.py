@@ -12,7 +12,7 @@ from app.context.examples import ESTIMATION_EXAMPLES
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_PROMPT_VERSION = "v1"
+DEFAULT_PROMPT_VERSION = "v2"
 
 PROMPTS_DIR = Path(__file__).parent
 

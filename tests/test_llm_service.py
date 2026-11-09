@@ -1,12 +1,36 @@
 """Verificaciones del contrato CAG sin llamadas reales a OpenAI."""
 
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.config import Settings
 from app.context.examples import ESTIMATION_EXAMPLES
+from app.schemas import DetailLevel, EstimationRequest, OutputFormat, ProjectType
 from app.services.llm_service import EstimationMetrics, generate_estimation, stream_estimation
+
+
+PHASES = json.dumps({
+    "phases": [
+        {"phase": "Diseño", "duration_weeks": 2, "cost_eur": 1000, "confidence_pct": 70},
+        {"phase": "Desarrollo", "duration_weeks": 4, "cost_eur": 4000, "confidence_pct": 60},
+    ],
+    "total_duration_weeks": 6,
+}, ensure_ascii=False)
+NARRATIVE = json.dumps({
+    "overview": "Aplicación móvil con acceso y avisos.",
+    "breakdown": "El trabajo se concentra en API, clientes y pruebas.",
+    "risks": "Las notificaciones dependen de credenciales de terceros.",
+}, ensure_ascii=False)
+
+
+def sample(description="Una reunión sobre una aplicación móvil", **overrides):
+    values = dict(
+        description=description, project_type=ProjectType.SOFTWARE,
+        detail_level=DetailLevel.DETAILED, output_format=OutputFormat.PHASES_TABLE,
+    )
+    return EstimationRequest(**(values | overrides))
 
 
 class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
@@ -26,12 +50,12 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.cache.get = AsyncMock(return_value=None)
         self.cache.set = AsyncMock()
         self.create.return_value = SimpleNamespace(choices=[SimpleNamespace(
-            finish_reason="stop", message=SimpleNamespace(content="Estimación generada")
+            finish_reason="stop", message=SimpleNamespace(content=PHASES)
         )])
 
-    async def test_sends_examples_and_transcription_in_separate_roles(self):
+    async def test_sends_examples_and_description_in_separate_roles(self):
         transcript = "Necesitamos una aplicación para gestionar cursos."
-        self.assertEqual(await generate_estimation(transcript), "Estimación generada")
+        self.assertEqual(await generate_estimation(sample(transcript)), PHASES)
         request = {"messages": self.create.call_args.args[1], **self.create.call_args.kwargs}
         self.assertIs(self.create.call_args.args[0], self.settings)
         system, user = request["messages"]
@@ -42,22 +66,26 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(example["meeting_summary"], system["content"])
             self.assertIn(example["estimation"].strip(), system["content"])
 
-    async def test_rejects_blank_transcription_without_calling_api(self):
-        with self.assertRaises(ValueError):
+    async def test_rejects_raw_text_without_calling_api(self):
+        with self.assertRaises(TypeError):
             await generate_estimation(" \n ")
+        with self.assertRaises(TypeError):
+            _ = [text async for text in stream_estimation(" \n ")]
         self.create.assert_not_awaited()
 
     async def test_stream_yields_chunks_before_generation_finishes(self):
+        raw = PHASES
+        first, second = raw[: len(raw) // 2], raw[len(raw) // 2 :]
         chunks = [
             SimpleNamespace(choices=[]),
             SimpleNamespace(choices=[SimpleNamespace(
                 delta=SimpleNamespace(content=None), finish_reason=None
             )]),
             SimpleNamespace(choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="Estimación "), finish_reason=None
+                delta=SimpleNamespace(content=first), finish_reason=None
             )]),
             SimpleNamespace(choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="generada"), finish_reason="stop"
+                delta=SimpleNamespace(content=second), finish_reason="stop"
             )]),
         ]
         stream = AsyncMock()
@@ -68,10 +96,11 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             usage=SimpleNamespace(prompt_tokens=321, completion_tokens=54),
         ))
         metrics = EstimationMetrics()
-        result = stream_estimation("Una reunión sobre una aplicación móvil", metrics=metrics)
-        self.assertEqual(await anext(result), "Estimación ")
+        description = "Una reunión sobre una aplicación móvil"
+        result = stream_estimation(sample(description), metrics=metrics)
+        self.assertEqual(await anext(result), first)
         stream.aclose.assert_not_awaited()
-        self.assertEqual([text async for text in result], ["generada"])
+        self.assertEqual([text async for text in result], [second])
         stream.aclose.assert_awaited_once()
         request = {"messages": self.create.call_args.args[1], **self.create.call_args.kwargs}
         self.assertTrue(request["stream"])
@@ -79,7 +108,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics.input_tokens, 321)
         self.assertEqual(metrics.output_tokens, 54)
         self.assertGreaterEqual(metrics.response_seconds, 0)
-        self.assertIn("<project_description>\nUna reunión sobre una aplicación móvil\n</project_description>", request["messages"][1]["content"])
+        self.assertIn(f"<project_description>\n{description}\n</project_description>", request["messages"][1]["content"])
         for example in ESTIMATION_EXAMPLES:
             self.assertIn(example["meeting_summary"], request["messages"][0]["content"])
 
@@ -92,13 +121,18 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
                 )])]
                 self.create.return_value = stream
                 with self.assertRaises(RuntimeError):
-                    _ = [text async for text in stream_estimation("Una reunión sobre una aplicación móvil")]
+                    _ = [text async for text in stream_estimation(sample())]
                 stream.aclose.assert_awaited_once()
 
-    async def test_stream_rejects_blank_input_without_api_call(self):
-        with self.assertRaises(ValueError):
-            _ = [text async for text in stream_estimation(" \n ")]
-        self.create.assert_not_awaited()
+    async def test_stream_rejects_invalid_json_without_caching_it(self):
+        stream = AsyncMock()
+        stream.__aiter__.return_value = [SimpleNamespace(choices=[SimpleNamespace(
+            delta=SimpleNamespace(content="Texto libre"), finish_reason="stop"
+        )])]
+        self.create.return_value = stream
+        with self.assertRaises(RuntimeError):
+            _ = [text async for text in stream_estimation(sample())]
+        self.cache.set.assert_not_awaited()
 
     async def test_stream_does_not_reuse_token_counts_when_usage_is_missing(self):
         metrics = EstimationMetrics(
@@ -108,14 +142,14 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         stream = AsyncMock()
         stream.__aiter__.return_value = [SimpleNamespace(
             choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="Nueva estimación"), finish_reason="stop"
+                delta=SimpleNamespace(content=PHASES), finish_reason="stop"
             )], usage=None, model=self.settings.llm_model,
         )]
         self.create.return_value = stream
 
         self.assertEqual(
-            [text async for text in stream_estimation("Otra reunión sobre una aplicación móvil", metrics=metrics)],
-            ["Nueva estimación"],
+            [text async for text in stream_estimation(sample("Otra reunión sobre una aplicación móvil"), metrics=metrics)],
+            [PHASES],
         )
         self.assertIsNone(metrics.input_tokens)
         self.assertIsNone(metrics.output_tokens)
@@ -128,7 +162,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.settings_patch.stop()
         with patch("app.services.llm_service.get_settings", return_value=self.settings):
-            self.assertEqual(await generate_estimation("Una reunión sobre una aplicación móvil"), "Estimación generada")
+            self.assertEqual(await generate_estimation(sample()), PHASES)
         self.assertIs(self.create.call_args.args[0], self.settings)
 
     async def test_rejects_empty_or_incomplete_responses(self):
@@ -140,46 +174,61 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(choices=choices):
                 self.create.return_value = SimpleNamespace(choices=choices)
                 with self.assertRaises(RuntimeError):
-                    await generate_estimation("Una reunión sobre una aplicación móvil")
+                    await generate_estimation(sample())
 
     async def test_cached_response_skips_provider_in_both_modes(self):
         from app.services.llm_cache import CachedEstimation
         self.cache.get.return_value = CachedEstimation(
-            content="Guardada", model="resolved", tokens_in=30, tokens_out=4
+            content=PHASES, model="resolved", tokens_in=30, tokens_out=4
         )
-        self.assertEqual(await generate_estimation("Una reunión sobre una aplicación móvil"), "Guardada")
+        self.assertEqual(await generate_estimation(sample()), PHASES)
         metrics = EstimationMetrics()
-        self.assertEqual([part async for part in stream_estimation("Una reunión sobre una aplicación móvil", metrics=metrics)], ["Guardada"])
+        self.assertEqual([part async for part in stream_estimation(sample(), metrics=metrics)], [PHASES])
         self.assertTrue(metrics.cache_hit)
         self.assertEqual(metrics.model, "resolved")
         self.assertEqual(metrics.input_tokens, 30)
         self.create.assert_not_awaited()
         self.cache.set.assert_not_awaited()
 
+    async def test_unusable_cache_entry_falls_through_to_the_provider(self):
+        from app.services.llm_cache import CachedEstimation
+        self.cache.get.return_value = CachedEstimation(
+            content="Texto libre", model="old", tokens_in=1, tokens_out=1
+        )
+        self.assertEqual(await generate_estimation(sample()), PHASES)
+        self.create.assert_awaited_once()
+        self.assertEqual(self.cache.set.call_args.args[1].content, PHASES)
+
     async def test_complete_response_is_saved_but_invalid_responses_are_not(self):
-        await generate_estimation("Una reunión sobre una aplicación móvil")
-        self.assertEqual(self.cache.set.call_args.args[1].content, "Estimación generada")
+        await generate_estimation(sample())
+        self.assertEqual(self.cache.set.call_args.args[1].content, PHASES)
         self.cache.set.reset_mock()
         self.create.return_value.choices[0].finish_reason = "length"
         with self.assertRaises(RuntimeError):
-            await generate_estimation("Una reunión sobre una aplicación móvil")
+            await generate_estimation(sample())
+        self.cache.set.assert_not_awaited()
+        self.cache.set.reset_mock()
+        self.create.return_value.choices[0].finish_reason = "stop"
+        self.create.return_value.choices[0].message.content = "Texto libre"
+        with self.assertRaises(RuntimeError):
+            await generate_estimation(sample())
         self.cache.set.assert_not_awaited()
 
     async def test_stream_is_saved_only_after_successful_completion(self):
         stream = AsyncMock()
         stream.__aiter__.return_value = [SimpleNamespace(choices=[SimpleNamespace(
-            delta=SimpleNamespace(content="Completa"), finish_reason="stop"
+            delta=SimpleNamespace(content=PHASES), finish_reason="stop"
         )])]
         self.create.return_value = stream
-        result = stream_estimation("Una reunión sobre una aplicación móvil")
-        self.assertEqual(await anext(result), "Completa")
+        result = stream_estimation(sample())
+        self.assertEqual(await anext(result), PHASES)
         self.cache.set.assert_not_awaited()
         self.assertEqual([part async for part in result], [])
-        self.assertEqual(self.cache.set.call_args.args[1].content, "Completa")
+        self.assertEqual(self.cache.set.call_args.args[1].content, PHASES)
         self.cache.set.reset_mock()
         stream.__aiter__.return_value[0].choices[0].finish_reason = "length"
         with self.assertRaises(RuntimeError):
-            _ = [part async for part in stream_estimation("Una reunión sobre una aplicación móvil")]
+            _ = [part async for part in stream_estimation(sample())]
         self.cache.set.assert_not_awaited()
 
     async def test_cancelled_stream_is_not_cached(self):
@@ -188,7 +237,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             delta=SimpleNamespace(content="Parcial"), finish_reason=None
         )])]
         self.create.return_value = stream
-        result = stream_estimation("Una reunión sobre una aplicación móvil")
+        result = stream_estimation(sample())
         await anext(result)
         await result.aclose()
         stream.aclose.assert_awaited_once()
@@ -196,7 +245,7 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_cache_calls_provider_without_reading_or_writing(self):
         self.settings.cache_enabled = False
-        self.assertEqual(await generate_estimation("Una reunión sobre una aplicación móvil"), "Estimación generada")
+        self.assertEqual(await generate_estimation(sample()), PHASES)
         self.cache.get.assert_not_awaited()
         self.cache.set.assert_not_awaited()
 
@@ -211,30 +260,48 @@ class GenerateEstimationTests(unittest.IsolatedAsyncioTestCase):
             "app.services.llm_cache.Redis.from_url"
         ) as factory:
             factory.return_value.__aenter__.return_value = redis
-            await generate_estimation("Una reunión sobre una aplicación móvil")
+            await generate_estimation(sample())
             metrics = EstimationMetrics()
-            result = [part async for part in stream_estimation("Una reunión sobre una aplicación móvil", metrics=metrics)]
-            self.assertEqual(result, ["Estimación generada"])
+            result = [part async for part in stream_estimation(sample(), metrics=metrics)]
+            self.assertEqual(result, [PHASES])
             self.assertTrue(metrics.cache_hit)
             self.create.assert_awaited_once()
-            await generate_estimation("Una reunión sobre una aplicación móvil ")
+            await generate_estimation(sample("Una reunión sobre una aplicación móvil "))
             self.assertEqual(self.create.await_count, 2)
 
     async def test_loader_messages_are_used_in_complete_and_streaming_modes(self):
         from app.prompts.loader import render_estimation_prompt
-        from app.schemas import EstimationRequest, ProjectType, DetailLevel, OutputFormat
-        request = EstimationRequest(
-            description="Mobile app with login and chat.", project_type=ProjectType.MOBILE_APP,
-            detail_level=DetailLevel.DETAILED, output_format=OutputFormat.NARRATIVE,
+        request = sample(
+            "Mobile app with login and chat.", project_type=ProjectType.MOBILE_APP,
+            output_format=OutputFormat.NARRATIVE,
         )
+        self.create.return_value.choices[0].message.content = NARRATIVE
         system, user = render_estimation_prompt(request)
         expected = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         await generate_estimation(request)
         self.assertEqual(self.create.call_args.args[1], expected)
         upstream = AsyncMock()
         upstream.__aiter__.return_value = [SimpleNamespace(choices=[SimpleNamespace(
-            delta=SimpleNamespace(content="Resultado"), finish_reason="stop"
+            delta=SimpleNamespace(content=NARRATIVE), finish_reason="stop"
         )])]
         self.create.return_value = upstream
         _ = [part async for part in stream_estimation(request)]
         self.assertEqual(self.create.call_args.args[1], expected)
+
+    async def test_rendered_prompt_is_reused_without_rendering_again(self):
+        prompt = ("System rules", "User description")
+        with patch("app.services.llm_service.render_estimation_prompt") as render:
+            await generate_estimation(sample(), prompt=prompt)
+            upstream = AsyncMock()
+            upstream.__aiter__.return_value = [SimpleNamespace(choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=PHASES), finish_reason="stop"
+            )])]
+            self.create.return_value = upstream
+            _ = [part async for part in stream_estimation(sample(), prompt=prompt)]
+        expected = [
+            {"role": "system", "content": "System rules"},
+            {"role": "user", "content": "User description"},
+        ]
+        self.assertEqual(self.create.call_args_list[0].args[1], expected)
+        self.assertEqual(self.create.call_args_list[1].args[1], expected)
+        render.assert_not_called()

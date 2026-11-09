@@ -72,21 +72,34 @@ curl -X POST http://localhost:8000/estimate \
   -d '{"description":"Aplicación móvil con login, chat y notificaciones push.","project_type":"mobile_app","detail_level":"detailed","output_format":"phases_table"}'
 ```
 
-Respuesta:
+Respuesta validada. `text` es el Markdown generado en el servidor a partir del
+desglose; el cuerpo incluye solo el objeto del formato pedido. `prompt_version`
+es `v2`.
 
 ```json
 {
-  "text": "## Estimación\n\nTexto libre generado por el modelo...",
-  "prompt_version": "v1"
+  "text": "## Estimación\n\n| phase | duration_weeks | cost_eur | confidence_pct |\n| --- | --- | --- | --- |\n| Diseño | 2 | 1000 | 70 |\n\n**Duración total:** 2 semanas",
+  "prompt_version": "v2",
+  "output_format": "phases_table",
+  "phases_table": {
+    "phases": [
+      {"phase": "Diseño", "duration_weeks": 2, "cost_eur": 1000, "confidence_pct": 70}
+    ],
+    "total_duration_weeks": 2
+  },
+  "line_items": null,
+  "narrative": null
 }
 ```
 
-`text` sigue siendo texto libre: no se valida todavía un desglose estructurado.
-La API valida el contrato antes de llamar al proveedor. Entradas inválidas
+`phases_table` exige que `total_duration_weeks` sea la suma de las fases.
+`line_items` exige que `total_hours` sea la suma de las tareas. `narrative`
+exige `overview`, `breakdown` y `risks` con texto. Un JSON inválido o un total
+que no cuadra no se guarda en caché y la API responde 502. Entradas inválidas
 reciben 422; configuración incorrecta, 503; errores del proveedor, 502;
 timeout del proveedor, 504. `/api/v1/estimate` permanece como alias del endpoint,
-con el mismo contrato nuevo. El anterior cuerpo con `transcription` y la
-respuesta con `estimation`, `model` y `provider` se sustituyen por este contrato.
+con el mismo contrato. El servicio solo acepta `EstimationRequest`: un texto
+suelto ya no se convierte en una petición con opciones por defecto.
 
 `GET /health` no consulta al proveedor y funciona sin claves LLM. La documentación
 OpenAPI del contrato está en `http://localhost:8000/docs`.
@@ -96,7 +109,7 @@ OpenAPI del contrato está en `http://localhost:8000/docs`.
 `app/prompts/loader.py` expone:
 
 ```python
-render_estimation_prompt(request, version="v1") -> tuple[str, str]
+render_estimation_prompt(request, version="v2") -> tuple[str, str]
 ```
 
 Devuelve `(system, user)` listos para enviar al modelo. Usa Jinja2 con

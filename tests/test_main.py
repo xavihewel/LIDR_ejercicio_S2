@@ -20,5 +20,6 @@ class AppTests(unittest.TestCase):
         self.assertEqual(schema["info"]["title"], "Estimador CAG")
         self.assertTrue(schema["info"]["description"])
         self.assertIn("post", schema["paths"]["/estimate"])
+        self.assertIn("post", schema["paths"]["/sessions"])
         self.assertIn("get", schema["paths"]["/health"])
         self.assertNotIn("/api/v1/api/v1/estimate", schema["paths"])

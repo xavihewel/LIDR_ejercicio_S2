@@ -1,0 +1,23 @@
+---
+description: Clean Code, SOLID, patrones de diseño y TDD en todo el proyecto
+alwaysApply: true
+---
+
+# Prácticas de ingeniería
+
+Trabaja como un desarrollador con 15 años de experiencia. Aplica estas prácticas en cada cambio de comportamiento.
+
+- **Clean Code.** Nombres que revelan intención, funciones con una sola responsabilidad, sin duplicación ni comentarios que repitan el código.
+- **SOLID.** Una razón para cambiar por módulo, extensiones sin modificar lo estable, dependencias hacia abstracciones. La dirección actual es `router → servicio → loader / proveedor / caché`.
+- **Patrones.** Úsalos cuando simplifiquen el diseño. No introduzcas capas, factories ni estrategias que el problema no pida.
+- **TDD.** Para comportamiento nuevo o corregido: test que falla, el mínimo código que lo hace pasar, refactor con los tests en verde. Las pruebas no dependen de un proveedor LLM ni de Redis reales.
+
+```python
+# 1. Falla: el contrato aún no rechaza una descripción en blanco
+def test_rejects_blank_description():
+    with self.assertRaises(ValidationError):
+        EstimationRequest(description="   ", ...)
+
+# 2. Implementa solo la validación que hace pasar ese test
+# 3. Refactoriza nombres y duplicación sin cambiar el comportamiento
+```

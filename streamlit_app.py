@@ -27,10 +27,30 @@ DETAIL_LABELS = {DetailLevel.SUMMARY: "Resumen", DetailLevel.MEDIUM: "Medio", De
 FORMAT_LABELS = {OutputFormat.PHASES_TABLE: "Tabla por fases", OutputFormat.LINE_ITEMS: "Listado de tareas", OutputFormat.NARRATIVE: "Narrativo"}
 
 
-def submit_estimation(request: EstimationRequest) -> EstimationResponse:
-    """Envía únicamente el contrato JSON; el cliente no necesita claves LLM."""
-    endpoint = f"{ClientSettings().estimation_api_url.rstrip('/')}/estimate"
-    response = httpx.post(endpoint, json=request.model_dump(mode="json"), timeout=120.0)
+def api_base_url() -> str:
+    return ClientSettings().estimation_api_url.rstrip("/")
+
+
+def ensure_session_id() -> str:
+    """Abre POST /sessions una vez y reutiliza el id entre reruns de Streamlit."""
+    session_id = st.session_state.get("session_id")
+    if session_id:
+        return session_id
+    response = httpx.post(f"{api_base_url()}/sessions", timeout=30.0)
+    response.raise_for_status()
+    session_id = response.json()["session_id"]
+    st.session_state.session_id = session_id
+    return session_id
+
+
+def submit_estimation(request: EstimationRequest, session_id: str) -> EstimationResponse:
+    """Envía el contrato JSON con X-Session-ID; el cliente no necesita claves LLM."""
+    response = httpx.post(
+        f"{api_base_url()}/estimate",
+        json=request.model_dump(mode="json"),
+        headers={"X-Session-ID": session_id},
+        timeout=120.0,
+    )
     response.raise_for_status()
     return EstimationResponse.model_validate(response.json())
 
@@ -58,11 +78,15 @@ def main() -> None:
         else:
             with st.spinner("Generando estimación…"):
                 try:
-                    st.session_state.estimation_result = submit_estimation(request)
+                    session_id = ensure_session_id()
+                    st.session_state.estimation_result = submit_estimation(request, session_id)
                 except httpx.TimeoutException:
                     st.error("El servicio no respondió a tiempo. Vuelve a intentarlo.")
                 except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        st.session_state.pop("session_id", None)
                     messages = {
+                        404: "La sesión ha expirado. Vuelve a enviar el formulario.",
                         422: "El servicio rechazó los datos. Revisa el formulario.",
                         502: "No se pudo obtener una estimación del proveedor.",
                         503: "El servicio de estimaciones no está disponible.",
@@ -71,7 +95,7 @@ def main() -> None:
                     st.error(messages.get(exc.response.status_code, "No se pudo obtener la estimación."))
                 except httpx.RequestError:
                     st.error("No se pudo conectar con el servicio de estimaciones.")
-                except ValueError:
+                except (KeyError, TypeError, ValueError):
                     st.error("El servicio devolvió una respuesta con un formato inesperado.")
 
     result = st.session_state.get("estimation_result")

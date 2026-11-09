@@ -1,4 +1,5 @@
 """Contrato HTTP validado antes de llamar al servicio LLM."""
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -8,26 +9,61 @@ from litellm.exceptions import AuthenticationError, Timeout
 from app.main import app
 from app.schemas import EstimationRequest
 from app.prompts.loader import render_estimation_prompt
+from app.services.output_guardrails import build_estimation_response
+from app.services.sessions import clear_sessions, get_session
 
 PAYLOAD = {
     "description": "Aplicación móvil con login, chat y notificaciones push.",
     "project_type": "mobile_app", "detail_level": "detailed", "output_format": "phases_table",
 }
+PHASES = json.dumps({
+    "phases": [
+        {"phase": "Diseño", "duration_weeks": 2, "cost_eur": 1000, "confidence_pct": 70},
+        {"phase": "Desarrollo", "duration_weeks": 4, "cost_eur": 4000, "confidence_pct": 60},
+    ],
+    "total_duration_weeks": 6,
+}, ensure_ascii=False)
 
 
 class EstimationEndpointTests(unittest.TestCase):
     def setUp(self):
+        clear_sessions()
         self.client = TestClient(app)
-        service = patch("app.routers.estimations.generate_estimation", new_callable=AsyncMock, return_value="Texto libre de estimación")
+        service = patch("app.routers.estimations.generate_estimation", new_callable=AsyncMock, return_value=PHASES)
         self.service = service.start()
         self.addCleanup(service.stop)
+        self.addCleanup(clear_sessions)
 
-    def test_returns_free_text_and_prompt_version(self):
-        response = self.client.post("/estimate", json=PAYLOAD)
+    def test_session_header_binds_the_turn_to_an_existing_session(self):
+        session_id = self.client.post("/sessions").json()["session_id"]
+        response = self.client.post(
+            "/estimate", json=PAYLOAD, headers={"X-Session-ID": session_id},
+        )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"text": "Texto libre de estimación", "prompt_version": "v1"})
+        history = get_session(session_id).history.messages
+        self.assertEqual(history[0]["role"], "system")
+        self.assertEqual(history[1]["role"], "user")
+        self.assertEqual(history[2], {"role": "assistant", "content": PHASES})
+
+    def test_unknown_session_header_does_not_call_the_llm(self):
+        response = self.client.post(
+            "/estimate", json=PAYLOAD, headers={"X-Session-ID": "missing-session"},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.service.assert_not_awaited()
+
+    def test_returns_validated_estimate_and_prompt_version(self):
+        response = self.client.post("/estimate", json=PAYLOAD)
         request = EstimationRequest.model_validate(PAYLOAD)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), build_estimation_response(PHASES, request, "v2").model_dump(mode="json"))
         self.service.assert_awaited_once_with(request, prompt=render_estimation_prompt(request))
+
+    def test_invalid_model_json_does_not_leak_the_payload(self):
+        self.service.return_value = "Texto libre"
+        response = self.client.post("/estimate", json=PAYLOAD)
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("Texto libre", response.text)
 
     def test_invalid_contract_does_not_call_llm(self):
         for extra in (
@@ -74,7 +110,7 @@ class EndpointProviderIntegrationTests(unittest.TestCase):
         from app.config import Settings
         settings = Settings(_env_file=None, openai_api_key="test", cache_enabled=False)
         result = SimpleNamespace(choices=[SimpleNamespace(
-            finish_reason="stop", message=SimpleNamespace(content="Texto libre")
+            finish_reason="stop", message=SimpleNamespace(content=PHASES)
         )])
         with patch("app.routers.estimations.render_estimation_prompt", return_value=("System rules", "User description")) as render, patch(
             "app.services.llm_service.get_settings", return_value=settings
@@ -82,7 +118,10 @@ class EndpointProviderIntegrationTests(unittest.TestCase):
             "app.services.llm_service.complete", new_callable=AsyncMock, return_value=result
         ) as complete:
             response = TestClient(app).post("/estimate", json=PAYLOAD)
-        self.assertEqual(response.json(), {"text": "Texto libre", "prompt_version": "v1"})
+        request = EstimationRequest.model_validate(PAYLOAD)
+        self.assertEqual(
+            response.json(), build_estimation_response(PHASES, request, "v2").model_dump(mode="json")
+        )
         render.assert_called_once()
         second_render.assert_not_called()
         complete.assert_awaited_once_with(settings, [
